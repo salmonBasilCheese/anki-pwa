@@ -28,9 +28,12 @@ const els = {
   back: $("back"), hint: $("hint"), position: $("position"),
   prev: $("prev"), next: $("next"),
   playWord: $("play-word"), playExample: $("play-example"),
+  library: $("library"), deckList: $("deck-list"),
+  persistStatus: $("persist-status"), backToLibrary: $("back-to-library"),
 };
 
 const state = {
+  deckId: null,           // 学習中のデッキID(保存済みデッキのキー)
   zip: null,
   mediaByName: new Map(), // "svl2k_3001_w.mp3" -> "123"(zip内のファイル名)
   cards: [],              // { id, fields: {フィールド名: 値} }
@@ -53,13 +56,10 @@ function setHtml(el, html) {
 // ---------------------------------------------------------------
 // 読み込み
 // ---------------------------------------------------------------
-async function loadApkg(file) {
-  setStatus("展開中...");
-  els.viewer.hidden = true;
-  releaseAudio();
-
-  const zip = await JSZip.loadAsync(file);
-  state.zip = zip;
+// .apkg(Blob)を展開して中身を読む。画面や state は触らない(保存前の検証にも使う)。
+// 戻り値: { zip, mediaByName, cards, deck: {id, name, cardCount}, deckLabel }
+async function parseApkg(blob) {
+  const zip = await JSZip.loadAsync(blob);
 
   const dbEntry = zip.file("collection.anki21");
   if (!dbEntry) {
@@ -71,25 +71,20 @@ async function loadApkg(file) {
   const db = new SQL.Database(await dbEntry.async("uint8array"));
 
   try {
-    await readCollection(db, zip);
+    return { zip, ...(await readCollection(db, zip)) };
   } finally {
     db.close();
   }
-
-  state.index = 0;
-  els.viewer.hidden = false;
-  showCard();
-  setStatus("");
 }
 
 async function readCollection(db, zip) {
   // media: { "0": "svl2k_3001_w.mp3", ... } を逆引きにする
-  state.mediaByName = new Map();
+  const mediaByName = new Map();
   const mediaEntry = zip.file("media");
   if (mediaEntry) {
     const mediaJson = JSON.parse(await mediaEntry.async("string"));
     for (const [num, name] of Object.entries(mediaJson)) {
-      state.mediaByName.set(name, num);
+      mediaByName.set(name, num);
     }
   }
 
@@ -107,7 +102,15 @@ async function readCollection(db, zip) {
     return didRows.length > 1 ? `${name} (${n}枚)` : name;
   });
   const total = didRows.reduce((sum, [, n]) => sum + n, 0);
-  els.deckInfo.textContent = `${deckNames.join(" / ")} — ${total}枚`;
+  const deckLabel = `${deckNames.join(" / ")} — ${total}枚`;
+
+  // 保存用のデッキ識別: カード数が最多のデッキの id と名前
+  const mainId = String(didRows[0][0]);
+  const deck = {
+    id: mainId,
+    name: decks[mainId]?.name ?? `(不明なデッキ ${mainId})`,
+    cardCount: total,
+  };
 
   // ノートタイプごとに フィールド名 -> 位置 を作る
   const fieldNames = new Map(); // mid(string) -> [名前...]
@@ -119,7 +122,7 @@ async function readCollection(db, zip) {
     "SELECT c.id, n.mid, n.flds FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.id"
   )[0].values;
 
-  state.cards = rows.map(([id, mid, flds]) => {
+  const cards = rows.map(([id, mid, flds]) => {
     const names = fieldNames.get(String(mid)) ?? [];
     const values = String(flds).split("\x1f");
     const fields = {};
@@ -128,10 +131,153 @@ async function readCollection(db, zip) {
   });
 
   // プロファイルのフィールドが実在するか確認(決め打ちのずれを早く知らせる)
-  const sample = state.cards[0].fields;
+  const sample = cards[0].fields;
   const missing = Object.values(DECK_PROFILE.fields).filter((n) => !(n in sample));
   if (missing.length) {
     throw new Error("このデッキに無いフィールドがあります: " + missing.join(", "));
+  }
+
+  return { mediaByName, cards, deck, deckLabel };
+}
+
+// 読み込み済みデッキを学習画面に出す
+function showDeck(parsed, startIndex) {
+  releaseAudio();
+  state.deckId = parsed.deck.id;
+  state.zip = parsed.zip;
+  state.mediaByName = parsed.mediaByName;
+  state.cards = parsed.cards;
+  state.index = clampIndex(startIndex, parsed.cards.length);
+  els.deckInfo.textContent = parsed.deckLabel;
+  els.library.hidden = true;
+  els.viewer.hidden = false;
+  showCard();
+  setStatus("");
+}
+
+function clampIndex(i, length) {
+  if (!Number.isInteger(i)) return 0;
+  return Math.min(Math.max(i, 0), length - 1);
+}
+
+// ---------------------------------------------------------------
+// 保存済みデッキの一覧・取り込み・削除
+// ---------------------------------------------------------------
+function describeError(e) {
+  if (e?.name === "QuotaExceededError") {
+    return "保存容量が足りません。不要なデッキを削除するか、ブラウザの空き容量を確認してください。";
+  }
+  return e?.message ?? String(e);
+}
+
+async function renderLibrary() {
+  const decks = await DeckStore.listDecks();
+  els.deckList.replaceChildren();
+
+  if (decks.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "保存済みのデッキはありません。.apkg を選んでください。";
+    els.deckList.appendChild(li);
+    return;
+  }
+
+  for (const d of decks) {
+    const li = document.createElement("li");
+    li.className = "deck-row";
+
+    // デッキ名はユーザー由来なので textContent で入れる
+    const name = document.createElement("div");
+    name.className = "deck-name";
+    name.textContent = d.name;
+
+    const meta = document.createElement("div");
+    meta.className = "deck-meta";
+    const progress = d.lastIndex === null ? "未学習" : `位置 ${d.lastIndex + 1} / ${d.cardCount}`;
+    meta.textContent = `${d.cardCount}枚 ・ ${progress}`;
+
+    const actions = document.createElement("div");
+    actions.className = "deck-actions";
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "open";
+    openBtn.textContent = "開く";
+    openBtn.addEventListener("click", () => openSaved(d.id));
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "danger";
+    delBtn.textContent = "削除";
+    delBtn.addEventListener("click", () => removeDeck(d));
+    actions.append(openBtn, delBtn);
+
+    li.append(name, meta, actions);
+    els.deckList.appendChild(li);
+  }
+}
+
+function showLibrary() {
+  releaseAudio();
+  state.deckId = null;
+  els.viewer.hidden = true;
+  els.library.hidden = false;
+}
+
+async function updatePersistStatus() {
+  const p = await DeckStore.requestPersistence();
+  els.persistStatus.textContent = !p.supported
+    ? "この環境では保存の永続化に未対応です(保存データはブラウザの判断で消えることがあります)"
+    : p.persisted
+      ? "保存の永続化: 有効"
+      : "保存の永続化: 未許可(ブラウザの判断で消えることがあります)";
+}
+
+async function openSaved(id) {
+  try {
+    setStatus("読み込み中...");
+    const blob = await DeckStore.getDeckBlob(id);
+    if (!blob) throw new Error("保存データが見つかりません");
+    const parsed = await parseApkg(blob);
+    const last = await DeckStore.getLastIndex(id);
+    await DeckStore.touchDeck(id);
+    showDeck(parsed, last ?? 0);
+  } catch (e) {
+    console.error(e);
+    setStatus("開けませんでした: " + describeError(e), true);
+  }
+}
+
+async function importFile(file) {
+  setStatus("展開中...");
+  const parsed = await parseApkg(file); // 壊れたファイルはここで失敗し、何も保存されない
+
+  const dups = await DeckStore.findDuplicates(parsed.deck);
+  if (dups.length > 0) {
+    const ok = confirm(`「${parsed.deck.name}」は保存済みです。置き換えますか？`);
+    if (!ok) {
+      setStatus("取り込みをキャンセルしました");
+      return;
+    }
+  }
+
+  setStatus("保存中...");
+  await DeckStore.saveDeck(parsed.deck, file, { replaceIds: dups.map((d) => d.id) });
+  await updatePersistStatus(); // ユーザー操作の直後なので許可されやすい
+  const last = await DeckStore.getLastIndex(parsed.deck.id);
+  showDeck(parsed, last ?? 0);
+}
+
+async function removeDeck(d) {
+  const ok = confirm(
+    `「${d.name}」とその学習の進み具合をすべて削除します。元に戻せません。よろしいですか？`
+  );
+  if (!ok) return;
+  try {
+    await DeckStore.deleteDeck(d.id);
+    await renderLibrary();
+    setStatus(`「${d.name}」を削除しました`);
+  } catch (e) {
+    console.error(e);
+    setStatus("削除できませんでした: " + describeError(e), true);
   }
 }
 
@@ -186,6 +332,7 @@ function move(delta) {
   if (next < 0 || next >= state.cards.length) return;
   state.index = next;
   showCard();
+  DeckStore.setLastIndex(state.deckId, next).catch((e) => console.error("位置の保存に失敗", e));
 }
 
 // ---------------------------------------------------------------
@@ -226,12 +373,31 @@ els.file.addEventListener("change", async () => {
   const file = els.file.files[0];
   if (!file) return;
   try {
-    await loadApkg(file);
+    await importFile(file);
   } catch (e) {
     console.error(e);
-    setStatus("読み込みに失敗しました: " + e.message, true);
+    setStatus("読み込みに失敗しました: " + describeError(e), true);
+  } finally {
+    els.file.value = ""; // 同じファイルをもう一度選んでも change が発火するように
   }
 });
+
+els.backToLibrary.addEventListener("click", async () => {
+  showLibrary();
+  setStatus("");
+  try { await renderLibrary(); } catch (e) { setStatus(describeError(e), true); }
+});
+
+// 起動時: 永続化を要求し、保存済みデッキの一覧を出す
+(async () => {
+  try {
+    await renderLibrary();
+    await updatePersistStatus();
+  } catch (e) {
+    console.error(e);
+    setStatus("保存データを開けませんでした: " + describeError(e), true);
+  }
+})();
 
 els.card.addEventListener("click", flip);
 els.prev.addEventListener("click", () => move(-1));

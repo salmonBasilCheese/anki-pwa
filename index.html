@@ -18,6 +18,7 @@
       --text-faint: #7d8087;         /* ヒント */
       --accent: #8ab4f8;             /* 品詞(.pos)・フォーカス */
       --error: #f28b82;
+      --danger: #f28b82;             /* 削除ボタンの文字・枠 */
       --disabled-text: #6a6d73;
       --radius: 10px;
     }
@@ -33,6 +34,22 @@
     #status { color: var(--text-muted); margin: 8px 0; }
     #status.error { color: var(--error); }
     #deck-info { font-weight: bold; margin: 12px 0; }
+    h2 { font-size: 1.1rem; margin: 20px 0 8px; }
+    #persist-status { color: var(--text-faint); font-size: 0.85rem; margin: 8px 0; }
+
+    /* 保存済みデッキの一覧 */
+    #deck-list { list-style: none; margin: 0; padding: 0; }
+    #deck-list .empty { color: var(--text-muted); }
+    .deck-row {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px;
+    }
+    .deck-name { font-weight: bold; }
+    .deck-meta { color: var(--text-muted); font-size: 0.9rem; margin: 2px 0 10px; }
+    .deck-actions { display: flex; gap: 10px; }
+    .deck-actions .open { flex: 1; }
+    button.danger { color: var(--danger); }
+    #back-to-library { margin-bottom: 4px; }
 
     #card {
       background: var(--surface); border: 1px solid var(--border);
@@ -68,10 +85,17 @@
 </head>
 <body>
   <h1>anki-pwa</h1>
-  <input type="file" id="file" accept=".apkg">
   <div id="status"></div>
 
+  <div id="library">
+    <input type="file" id="file" accept=".apkg">
+    <div id="persist-status"></div>
+    <h2>保存済みデッキ</h2>
+    <ul id="deck-list"></ul>
+  </div>
+
   <div id="viewer" hidden>
+    <button id="back-to-library" type="button">← 一覧へ戻る</button>
     <div id="deck-info"></div>
     <div id="card">
       <div id="front"></div>
@@ -92,6 +116,7 @@
   <script src="lib/jszip.min.js"></script>
   <script src="lib/sql-wasm.js"></script>
   <script src="lib/purify.min.js"></script>
+  <script src="storage.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
