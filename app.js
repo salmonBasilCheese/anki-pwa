@@ -18,8 +18,13 @@ const DECK_PROFILE = {
   },
   front: ["headword"],
   back: ["ipa", "meaning", "exampleEN", "exampleJA"],
-  audio: { word: "audioWord", example: "audioExample" },
+  // 音声ボタンを置く場所: 「表示する項目 → その横に置くボタンが鳴らす音声の項目」
+  audioButtons: { headword: "audioWord", exampleEN: "audioExample" },
 };
+
+// スピーカーのアイコン(固定のSVG。ユーザーのデータは含まない)
+const AUDIO_ICON =
+  '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
 
 const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
 const DEBUG_OFFSET_KEY = "anki-pwa-debug-offset-ms";
@@ -28,15 +33,14 @@ const $ = (id) => document.getElementById(id);
 const els = {
   file: $("file"), status: $("status"), viewer: $("viewer"),
   deckInfo: $("deck-info"), card: $("card"), front: $("front"), back: $("back"),
-  playWord: $("play-word"), playExample: $("play-example"),
-  library: $("library"), deckList: $("deck-list"),
+  library: $("library"), deckList: $("deck-list"), version: $("app-version"),
   persistStatus: $("persist-status"), backToLibrary: $("back-to-library"),
   study: $("study"), showAnswer: $("show-answer"), grades: $("grades"),
   gradeButtons: [...document.querySelectorAll(".grade")],
   counts: { new: $("count-new"), learning: $("count-learning"), review: $("count-review") },
   countBoxes: [...document.querySelectorAll(".count")],
   done: $("done"), doneNote: $("done-note"),
-  debug: $("debug"), debugClock: $("debug-clock"),
+  debug: $("debug"), debugClock: $("debug-clock"), debugViewport: $("debug-viewport"),
 };
 
 const state = {
@@ -112,7 +116,7 @@ async function readCollection(db, zip) {
     return didRows.length > 1 ? `${name} (${n}枚)` : name;
   });
   const total = didRows.reduce((sum, [, n]) => sum + n, 0);
-  const deckLabel = `${deckNames.join(" / ")} — ${total}枚`;
+  const deckLabel = `${deckNames.join(" / ")} ・ ${total}枚`;
 
   // 保存用のデッキ識別: カード数が最多のデッキの id と名前
   const mainId = String(didRows[0][0]);
@@ -381,9 +385,7 @@ function advance() {
   els.back.hidden = true;
   els.grades.hidden = true;
   els.showAnswer.hidden = false;
-
-  els.playWord.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.word));
-  els.playExample.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.example));
+  els.card.scrollTop = 0; // 前のカードで下までスクロールしていても、先頭から見せる
 }
 
 function doneNote(nowMs) {
@@ -445,9 +447,33 @@ function renderSide(container, keys, card) {
   for (const key of keys) {
     const div = document.createElement("div");
     div.className = "field " + key;
-    setHtml(div, fieldValue(card, key));
+    const audioKey = DECK_PROFILE.audioButtons[key];
+    if (audioKey) {
+      // 項目の横に小さな音声ボタンを置く
+      const text = document.createElement("div");
+      text.className = "text";
+      setHtml(text, fieldValue(card, key));
+      div.classList.add("with-audio");
+      div.append(text, buildAudioButton(card, audioKey));
+    } else {
+      setHtml(div, fieldValue(card, key));
+    }
     container.appendChild(div);
   }
+}
+
+function buildAudioButton(card, audioKey) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "audio-btn";
+  btn.setAttribute("aria-label", "音声を再生");
+  btn.innerHTML = AUDIO_ICON;
+  btn.disabled = !hasAudio(soundName(card, audioKey)); // 音声が無いカードでは押せない
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation(); // カードのタップ(答えを見る)にしない
+    playSound(audioKey).catch((err) => setStatus("再生できません: " + err.message, true));
+  });
+  return btn;
 }
 
 function soundName(card, profileKey) {
@@ -522,6 +548,87 @@ function updateDebugClock() {
 }
 
 // ---------------------------------------------------------------
+// 画面幅の崩れ対策(iPhone のホーム画面アプリ)
+// アプリを閉じて開き直したときに、画面が拡大されたり横にはみ出したりすることがある。
+// 復帰時にそれを検出し、viewport を一瞬書き換えて iOS にレイアウトを計算し直させる。
+// ---------------------------------------------------------------
+const viewportMeta = document.querySelector('meta[name="viewport"]');
+const VIEWPORT_ORIGINAL = viewportMeta?.getAttribute("content") ?? "";
+
+function measureViewport() {
+  const vv = window.visualViewport;
+  const root = document.documentElement;
+  return {
+    innerWidth: window.innerWidth,
+    contentWidth: root.scrollWidth,
+    scale: vv ? vv.scale : 1,
+    zoomed: !!vv && Math.abs(vv.scale - 1) > 0.01,
+    overflowX: root.scrollWidth > root.clientWidth + 1 || window.scrollX !== 0,
+  };
+}
+
+// 画面の右端を越えている要素(原因調べ用。?debug=1 のときだけ表示する)
+function overflowingElements() {
+  const w = document.documentElement.clientWidth;
+  return [...document.body.querySelectorAll("*")]
+    .filter((el) => el.getBoundingClientRect().right > w + 1)
+    .slice(0, 3)
+    .map((el) => {
+      const cls = typeof el.className === "string" && el.className ? "." + el.className.split(" ")[0] : "";
+      return el.id ? `#${el.id}` : el.tagName.toLowerCase() + cls;
+    });
+}
+
+function updateDebugViewport() {
+  if (!DEBUG) return;
+  const m = measureViewport();
+  const bad = m.overflowX ? overflowingElements() : [];
+  els.debugViewport.textContent =
+    `画面幅 ${m.innerWidth}px / 内容幅 ${m.contentWidth}px / 拡大率 ${m.scale.toFixed(2)} / 高さ ${window.innerHeight}px` +
+    (bad.length ? ` / はみ出し: ${bad.join(", ")}` : "");
+}
+
+let stabilizing = false;
+function stabilizeViewport() {
+  const m = measureViewport();
+  updateDebugViewport();
+  if ((!m.zoomed && !m.overflowX) || stabilizing || !viewportMeta) return;
+  stabilizing = true;
+  viewportMeta.setAttribute("content", VIEWPORT_ORIGINAL + ", minimum-scale=1"); // 内容を変えて再解釈させる
+  window.scrollTo(0, 0);
+  setTimeout(() => {
+    viewportMeta.setAttribute("content", VIEWPORT_ORIGINAL);
+    stabilizing = false;
+    updateDebugViewport();
+  }, 150);
+}
+
+// ---------------------------------------------------------------
+// アプリのバージョン表示(iPhone で更新が届いたかを確かめるため)
+// 今動いている Service Worker に尋ねる(sw.js の CACHE_VERSION が返る)。
+// ---------------------------------------------------------------
+function askServiceWorkerVersion() {
+  return new Promise((resolve) => {
+    const controller = navigator.serviceWorker?.controller;
+    if (!controller) return resolve(null);
+    const channel = new MessageChannel();
+    channel.port1.onmessage = (e) => resolve(e.data?.version ?? null);
+    controller.postMessage("GET_VERSION", [channel.port2]);
+    setTimeout(() => resolve(null), 1500);
+  });
+}
+
+async function showVersion() {
+  if (!("serviceWorker" in navigator)) { els.version.textContent = ""; return; }
+  if (!navigator.serviceWorker.controller) {
+    els.version.textContent = "アプリのバージョン: ―(Service Worker は未使用)";
+    return;
+  }
+  const v = await askServiceWorkerVersion();
+  els.version.textContent = v ? `アプリのバージョン: ${v}` : "アプリのバージョン: 確認できません";
+}
+
+// ---------------------------------------------------------------
 // イベント
 // ---------------------------------------------------------------
 els.file.addEventListener("change", async () => {
@@ -548,10 +655,6 @@ els.showAnswer.addEventListener("click", revealAnswer);
 for (const btn of els.gradeButtons) {
   btn.addEventListener("click", () => gradeCurrent(Number(btn.dataset.grade)));
 }
-els.playWord.addEventListener("click", () =>
-  playSound(DECK_PROFILE.audio.word).catch((e) => setStatus("再生できません: " + e.message, true)));
-els.playExample.addEventListener("click", () =>
-  playSound(DECK_PROFILE.audio.example).catch((e) => setStatus("再生できません: " + e.message, true)));
 
 // キーボード(PC): Space=答えを見る、1〜4=もう一度/難しい/正解/簡単
 document.addEventListener("keydown", (e) => {
@@ -573,9 +676,18 @@ document.addEventListener("keydown", (e) => {
 
 // 「今日の学習は終わりです」の画面で、数分後に学習中カードの期限が来たら自動で再開する
 setInterval(() => {
-  if (DEBUG) updateDebugClock();
+  if (DEBUG) { updateDebugClock(); updateDebugViewport(); }
   if (state.session && !els.done.hidden && !state.busy) advance();
 }, 15000);
+
+// 復帰・回転・入力欄のフォーカス解除のあとに、画面の拡大や横はみ出しを確認して直す
+window.addEventListener("pageshow", stabilizeViewport);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") stabilizeViewport();
+});
+window.addEventListener("orientationchange", () => setTimeout(stabilizeViewport, 300));
+document.addEventListener("focusout", () => setTimeout(stabilizeViewport, 300));
+window.visualViewport?.addEventListener("resize", updateDebugViewport);
 
 // ---------------------------------------------------------------
 // PWA: Service Worker の登録と更新通知
@@ -609,6 +721,7 @@ function initServiceWorker() {
   // 新しい Service Worker に切り替わったら再読み込み(初回インストール時の切り替えでは読み込み直さない)
   let reloading = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
+    showVersion();
     if (!updateRequested || reloading) return;
     reloading = true;
     location.reload();
@@ -637,7 +750,9 @@ function initServiceWorker() {
 // 起動時: デバッグ設定、Service Worker、永続化の要求、保存済みデッキの一覧
 (async () => {
   initDebug();
+  updateDebugViewport();
   initServiceWorker();
+  showVersion();
   try {
     await renderLibrary();
     await updatePersistStatus();

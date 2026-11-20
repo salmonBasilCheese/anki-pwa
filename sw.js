@@ -4,7 +4,7 @@
 // アプリを更新したら、この番号を上げる(v1 → v2 ...)。
 // 番号が変わると新しいキャッシュが作られ、古いキャッシュは削除される。
 // ---------------------------------------------------------------
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `anki-pwa-${CACHE_VERSION}`;
 
 // オフラインで必要なファイルの一覧(すべて、この sw.js からの相対パス)。
@@ -57,6 +57,8 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("message", (event) => {
   if (event.data === "SKIP_WAITING") self.skipWaiting();
+  // 画面に「アプリのバージョン」を出すための問い合わせ
+  if (event.data === "GET_VERSION") event.ports[0]?.postMessage({ version: CACHE_VERSION });
 });
 
 self.addEventListener("fetch", (event) => {
