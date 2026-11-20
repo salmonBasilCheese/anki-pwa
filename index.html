@@ -2,8 +2,16 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- viewport-fit=cover: ノッチの裏まで描画する(余白は env(safe-area-inset-*) で自分で避ける) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>anki-pwa</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#1e1f22">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Anki">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <style>
     /* 色はここに集約。調整するときはこの変数だけ触る */
     :root {
@@ -27,12 +35,18 @@
       --radius: 10px;
     }
 
-    html { -webkit-text-size-adjust: 100%; }
+    html { -webkit-text-size-adjust: 100%; touch-action: manipulation; /* ダブルタップ拡大を防ぐ */ }
     body {
       font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", sans-serif;
       font-size: 18px; line-height: 1.6;
       background: var(--bg); color: var(--text);
-      max-width: 640px; margin: 0 auto; padding: 16px;
+      max-width: 640px; margin: 0 auto;
+      /* 16px の余白 + ノッチ・ホームバーなどの安全領域(iPhone 以外では 0) */
+      padding:
+        calc(16px + env(safe-area-inset-top))
+        calc(16px + env(safe-area-inset-right))
+        calc(16px + env(safe-area-inset-bottom))
+        calc(16px + env(safe-area-inset-left));
     }
     h1 { font-size: 1.3rem; margin: 0 0 12px; }
     #status { color: var(--text-muted); margin: 8px 0; }
@@ -73,15 +87,26 @@
     .count b { color: var(--text); font-variant-numeric: tabular-nums; }
     .count.current b { text-decoration: underline; text-underline-offset: 4px; }
 
-    /* 答えを見る / 4つの回答ボタン */
-    #show-answer { width: 100%; min-height: 56px; }
+    /* 答えを見る / 4つの回答ボタン: 画面下部に固定(親指で押しやすく、ホームバーに隠れない) */
+    #study { padding-bottom: calc(120px + env(safe-area-inset-bottom)); } /* 固定バーに隠れない余白 */
+    #action-bar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+      background: var(--bg); border-top: 1px solid var(--border);
+      padding:
+        10px
+        calc(16px + env(safe-area-inset-right))
+        calc(10px + env(safe-area-inset-bottom))
+        calc(16px + env(safe-area-inset-left));
+    }
+    #action-bar > * { max-width: 608px; margin: 0 auto; }
+    #show-answer { display: block; width: 100%; min-height: 76px; font-size: 1.15rem; }
     #show-answer small { color: var(--text-faint); }
-    #grades { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    #grades { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
     .grade {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 2px; padding: 8px 4px; min-height: 64px; font-size: 0.95rem;
+      gap: 2px; padding: 8px 2px; min-height: 76px; font-size: 1.05rem;
     }
-    .grade .interval { font-size: 0.85rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .grade .interval { font-size: 0.95rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
     .grade.again .grade-label { color: var(--again); }
     .grade.hard .grade-label { color: var(--hard); }
     .grade.good .grade-label { color: var(--good); }
@@ -96,6 +121,13 @@
     .deck-limit input {
       font: inherit; width: 5em; padding: 6px 8px; min-height: 40px;
       color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+    }
+
+    /* 新しいバージョンのお知らせ(Service Worker が更新を見つけたとき) */
+    #update-banner {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      background: var(--surface); border: 1px solid var(--accent);
+      border-radius: var(--radius); padding: 8px 8px 8px 14px; margin-bottom: 12px;
     }
 
     /* デバッグ用(?debug=1) */
@@ -123,6 +155,10 @@
   </style>
 </head>
 <body>
+  <div id="update-banner" hidden>
+    <span>新しいバージョンがあります</span>
+    <button id="update-btn" type="button">更新</button>
+  </div>
   <h1>anki-pwa</h1>
   <div id="status"></div>
 
@@ -151,12 +187,14 @@
         <button id="play-word" type="button">単語を再生</button>
         <button id="play-example" type="button">例文を再生</button>
       </div>
-      <button id="show-answer" type="button">答えを見る <small>(Space)</small></button>
-      <div id="grades" hidden>
-        <button type="button" class="grade again" data-grade="1"><span class="interval"></span><span class="grade-label">もう一度</span></button>
-        <button type="button" class="grade hard" data-grade="2"><span class="interval"></span><span class="grade-label">難しい</span></button>
-        <button type="button" class="grade good" data-grade="3"><span class="interval"></span><span class="grade-label">正解</span></button>
-        <button type="button" class="grade easy" data-grade="4"><span class="interval"></span><span class="grade-label">簡単</span></button>
+      <div id="action-bar">
+        <button id="show-answer" type="button">答えを見る <small>(Space)</small></button>
+        <div id="grades" hidden>
+          <button type="button" class="grade again" data-grade="1"><span class="interval"></span><span class="grade-label">もう一度</span></button>
+          <button type="button" class="grade hard" data-grade="2"><span class="interval"></span><span class="grade-label">難しい</span></button>
+          <button type="button" class="grade good" data-grade="3"><span class="interval"></span><span class="grade-label">正解</span></button>
+          <button type="button" class="grade easy" data-grade="4"><span class="interval"></span><span class="grade-label">簡単</span></button>
+        </div>
       </div>
     </div>
 

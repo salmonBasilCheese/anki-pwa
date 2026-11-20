@@ -577,9 +577,67 @@ setInterval(() => {
   if (state.session && !els.done.hidden && !state.busy) advance();
 }, 15000);
 
-// 起動時: デバッグ設定、永続化の要求、保存済みデッキの一覧
+// ---------------------------------------------------------------
+// PWA: Service Worker の登録と更新通知
+// 更新の流れ: sw.js の CACHE_VERSION を上げて公開 → 新しい Service Worker が裏で
+// キャッシュを作って待機 → 「新しいバージョンがあります [更新]」を表示 → 押すと切り替えて再読み込み。
+// (学習中に勝手に入れ替わらないよう、切り替えは押したときだけ)
+// ---------------------------------------------------------------
+function initServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  // 開発中(localhost)は古いコードがキャッシュされて混乱するので登録しない。試すときだけ ?sw=1
+  const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  if (isLocal && new URLSearchParams(location.search).get("sw") !== "1") return;
+
+  const banner = $("update-banner");
+  const button = $("update-btn");
+  let waiting = null;
+  let updateRequested = false;
+
+  const offerUpdate = (worker) => {
+    waiting = worker;
+    banner.hidden = false;
+  };
+
+  button.addEventListener("click", () => {
+    updateRequested = true;
+    button.disabled = true;
+    waiting?.postMessage("SKIP_WAITING");
+  });
+
+  // 新しい Service Worker に切り替わったら再読み込み(初回インストール時の切り替えでは読み込み直さない)
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!updateRequested || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+
+  navigator.serviceWorker.register("sw.js").then((reg) => {
+    // すでに待機中の更新がある(前回見つけたが、まだ切り替えていない)
+    if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg.waiting);
+
+    reg.addEventListener("updatefound", () => {
+      const worker = reg.installing;
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        // controller があるときだけ「更新」。無いときは初回インストールなので通知しない
+        if (worker.state === "installed" && navigator.serviceWorker.controller) offerUpdate(worker);
+      });
+    });
+
+    // ホーム画面のアプリは起動したまま長く残るので、前面に戻るたびに更新を確認する
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") reg.update().catch(() => {});
+    });
+  }).catch((e) => console.error("Service Worker の登録に失敗しました", e));
+}
+
+// 起動時: デバッグ設定、Service Worker、永続化の要求、保存済みデッキの一覧
 (async () => {
   initDebug();
+  initServiceWorker();
   try {
     await renderLibrary();
     await updatePersistStatus();
