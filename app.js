@@ -21,24 +21,34 @@ const DECK_PROFILE = {
   audio: { word: "audioWord", example: "audioExample" },
 };
 
+const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
+const DEBUG_OFFSET_KEY = "anki-pwa-debug-offset-ms";
+
 const $ = (id) => document.getElementById(id);
 const els = {
   file: $("file"), status: $("status"), viewer: $("viewer"),
-  deckInfo: $("deck-info"), card: $("card"), front: $("front"),
-  back: $("back"), hint: $("hint"), position: $("position"),
-  prev: $("prev"), next: $("next"),
+  deckInfo: $("deck-info"), card: $("card"), front: $("front"), back: $("back"),
   playWord: $("play-word"), playExample: $("play-example"),
   library: $("library"), deckList: $("deck-list"),
   persistStatus: $("persist-status"), backToLibrary: $("back-to-library"),
+  study: $("study"), showAnswer: $("show-answer"), grades: $("grades"),
+  gradeButtons: [...document.querySelectorAll(".grade")],
+  counts: { new: $("count-new"), learning: $("count-learning"), review: $("count-review") },
+  countBoxes: [...document.querySelectorAll(".count")],
+  done: $("done"), doneNote: $("done-note"),
+  debug: $("debug"), debugClock: $("debug-clock"),
 };
 
 const state = {
   deckId: null,           // 学習中のデッキID(保存済みデッキのキー)
   zip: null,
   mediaByName: new Map(), // "svl2k_3001_w.mp3" -> "123"(zip内のファイル名)
-  cards: [],              // { id, fields: {フィールド名: 値} }
-  index: 0,
-  flipped: false,
+  cards: [],              // 並び順どおりの { id, fields: {フィールド名: 値} }
+  cardById: new Map(),
+  session: null,          // srs.js のセッション(出題状態)
+  current: null,          // 今出しているカード { cardId, kind, record, card }
+  revealed: false,
+  busy: false,            // 回答の保存中
   audioUrls: new Map(),   // 現在のカードで作った Blob URL
   player: null,
 };
@@ -118,8 +128,9 @@ async function readCollection(db, zip) {
     fieldNames.set(mid, model.flds.map((f) => f.name));
   }
 
+  // 新規カードの並びは Anki と同じ cards.due(新規の出題位置)順、同値は id 順
   const rows = db.exec(
-    "SELECT c.id, n.mid, n.flds FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.id"
+    "SELECT c.id, n.mid, n.flds FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.due, c.id"
   )[0].values;
 
   const cards = rows.map(([id, mid, flds]) => {
@@ -138,26 +149,6 @@ async function readCollection(db, zip) {
   }
 
   return { mediaByName, cards, deck, deckLabel };
-}
-
-// 読み込み済みデッキを学習画面に出す
-function showDeck(parsed, startIndex) {
-  releaseAudio();
-  state.deckId = parsed.deck.id;
-  state.zip = parsed.zip;
-  state.mediaByName = parsed.mediaByName;
-  state.cards = parsed.cards;
-  state.index = clampIndex(startIndex, parsed.cards.length);
-  els.deckInfo.textContent = parsed.deckLabel;
-  els.library.hidden = true;
-  els.viewer.hidden = false;
-  showCard();
-  setStatus("");
-}
-
-function clampIndex(i, length) {
-  if (!Number.isInteger(i)) return 0;
-  return Math.min(Math.max(i, 0), length - 1);
 }
 
 // ---------------------------------------------------------------
@@ -193,8 +184,9 @@ async function renderLibrary() {
 
     const meta = document.createElement("div");
     meta.className = "deck-meta";
-    const progress = d.lastIndex === null ? "未学習" : `位置 ${d.lastIndex + 1} / ${d.cardCount}`;
-    meta.textContent = `${d.cardCount}枚 ・ ${progress}`;
+    meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚`;
+
+    li.append(name, meta, buildLimitInput(d));
 
     const actions = document.createElement("div");
     actions.className = "deck-actions";
@@ -210,14 +202,51 @@ async function renderLibrary() {
     delBtn.addEventListener("click", () => removeDeck(d));
     actions.append(openBtn, delBtn);
 
-    li.append(name, meta, actions);
+    li.append(actions);
     els.deckList.appendChild(li);
   }
+}
+
+// 新規カードの1日の上限(デッキごと)
+function buildLimitInput(d) {
+  const label = document.createElement("label");
+  label.className = "deck-limit";
+  label.append("新規カード/日");
+
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "0";
+  input.max = "999";
+  input.step = "1";
+  input.inputMode = "numeric";
+  let saved = d.newPerDay ?? SRS_CONFIG.defaultNewPerDay;
+  input.value = String(saved);
+
+  input.addEventListener("change", async () => {
+    const n = Number(input.value);
+    if (!Number.isInteger(n) || n < 0 || n > 999) {
+      input.value = String(saved); // 不正な値は元に戻す
+      return;
+    }
+    try {
+      await DeckStore.setNewPerDay(d.id, n);
+      saved = n;
+    } catch (e) {
+      console.error(e);
+      input.value = String(saved);
+      setStatus("設定を保存できませんでした: " + describeError(e), true);
+    }
+  });
+
+  label.append(input);
+  return label;
 }
 
 function showLibrary() {
   releaseAudio();
   state.deckId = null;
+  state.session = null;
+  state.current = null;
   els.viewer.hidden = true;
   els.library.hidden = false;
 }
@@ -237,9 +266,8 @@ async function openSaved(id) {
     const blob = await DeckStore.getDeckBlob(id);
     if (!blob) throw new Error("保存データが見つかりません");
     const parsed = await parseApkg(blob);
-    const last = await DeckStore.getLastIndex(id);
     await DeckStore.touchDeck(id);
-    showDeck(parsed, last ?? 0);
+    await startStudy(parsed);
   } catch (e) {
     console.error(e);
     setStatus("開けませんでした: " + describeError(e), true);
@@ -262,8 +290,7 @@ async function importFile(file) {
   setStatus("保存中...");
   await DeckStore.saveDeck(parsed.deck, file, { replaceIds: dups.map((d) => d.id) });
   await updatePersistStatus(); // ユーザー操作の直後なので許可されやすい
-  const last = await DeckStore.getLastIndex(parsed.deck.id);
-  showDeck(parsed, last ?? 0);
+  await startStudy(parsed);
 }
 
 async function removeDeck(d) {
@@ -278,6 +305,131 @@ async function removeDeck(d) {
   } catch (e) {
     console.error(e);
     setStatus("削除できませんでした: " + describeError(e), true);
+  }
+}
+
+// ---------------------------------------------------------------
+// 復習(学習画面)
+// ---------------------------------------------------------------
+async function startStudy(parsed) {
+  releaseAudio();
+  state.deckId = parsed.deck.id;
+  state.zip = parsed.zip;
+  state.mediaByName = parsed.mediaByName;
+  state.cards = parsed.cards;
+  state.cardById = new Map(parsed.cards.map((c) => [c.id, c]));
+  els.deckInfo.textContent = parsed.deckLabel;
+
+  await buildSession();
+  els.library.hidden = true;
+  els.viewer.hidden = false;
+  setStatus("");
+  advance();
+}
+
+// 保存済みの学習記録・上限・今日の導入数から、出題状態を作る
+async function buildSession() {
+  const id = state.deckId;
+  const nowMs = Srs.now();
+  const [records, limit, newToday] = await Promise.all([
+    DeckStore.getCardRecords(id),
+    DeckStore.getNewPerDay(id),
+    DeckStore.countNewSince(id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
+  ]);
+  state.session = Srs.createSession({
+    cards: state.cards,
+    records: records.filter((r) => state.cardById.has(r.cardId)), // デッキに無いカードの記録は無視
+    newPerDay: limit ?? SRS_CONFIG.defaultNewPerDay,
+    newToday,
+    nowMs,
+  });
+}
+
+function updateCounts(kind) {
+  const c = Srs.counts(state.session, Srs.now());
+  els.counts.new.textContent = c.new;
+  els.counts.learning.textContent = c.learning;
+  els.counts.review.textContent = c.review;
+  for (const box of els.countBoxes) box.classList.toggle("current", box.dataset.kind === kind);
+}
+
+// 次のカードを選んで表(答えを隠した状態)を出す。無ければ終了表示。
+function advance() {
+  releaseAudio();
+  state.revealed = false;
+
+  const nowMs = Srs.now();
+  const pick = Srs.pickNext(state.session, nowMs);
+  updateCounts(pick?.kind);
+
+  if (!pick) {
+    state.current = null;
+    els.study.hidden = true;
+    els.done.hidden = false;
+    els.doneNote.textContent = doneNote(nowMs);
+    return;
+  }
+
+  els.done.hidden = true;
+  els.study.hidden = false;
+
+  const card = state.cardById.get(pick.cardId);
+  state.current = { ...pick, card };
+
+  renderSide(els.front, DECK_PROFILE.front, card);
+  renderSide(els.back, DECK_PROFILE.back, card);
+  els.back.hidden = true;
+  els.grades.hidden = true;
+  els.showAnswer.hidden = false;
+
+  els.playWord.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.word));
+  els.playExample.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.example));
+}
+
+function doneNote(nowMs) {
+  const s = state.session;
+  const notes = [];
+  if (s.unseen.length > 0 && s.newToday >= s.newPerDay) {
+    notes.push(`新規カードは今日の上限(${s.newPerDay}枚)に達しました。`);
+  }
+  const due = Srs.nextLearningDue(s, nowMs);
+  if (due !== null) {
+    notes.push(`あと${Srs.formatInterval(due - nowMs)}で次の学習中カードが出ます。`);
+  }
+  return notes.join(" ");
+}
+
+function revealAnswer() {
+  if (!state.current || state.revealed) return;
+  state.revealed = true;
+  els.back.hidden = false;
+  els.showAnswer.hidden = true;
+
+  const labels = Srs.labels(state.current.record, Srs.now());
+  for (const btn of els.gradeButtons) {
+    btn.querySelector(".interval").textContent = labels[btn.dataset.grade];
+  }
+  els.grades.hidden = false;
+  document.activeElement?.blur?.(); // Space がボタンを二重に押さないように
+}
+
+async function gradeCurrent(grade) {
+  if (!state.current || !state.revealed || state.busy) return;
+  state.busy = true;
+  const session = state.session;
+  try {
+    const cur = state.current;
+    const nowMs = Srs.now();
+    const { record, log } = Srs.answer(cur.record, state.deckId, cur.cardId, grade, nowMs);
+    await DeckStore.saveReview(state.deckId, record, log); // 保存できてから次へ
+    if (state.session !== session) return; // 保存中に一覧へ戻った
+    Srs.applyAnswer(session, record, log, nowMs);
+    advance();
+  } catch (e) {
+    console.error(e);
+    setStatus("回答を保存できませんでした: " + describeError(e), true);
+  } finally {
+    state.busy = false;
   }
 }
 
@@ -303,38 +455,6 @@ function soundName(card, profileKey) {
   return m ? m[1] : null;
 }
 
-function showCard() {
-  const card = state.cards[state.index];
-  releaseAudio();
-  state.flipped = false;
-
-  renderSide(els.front, DECK_PROFILE.front, card);
-  renderSide(els.back, DECK_PROFILE.back, card);
-  els.back.hidden = true;
-  els.hint.hidden = false;
-
-  els.playWord.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.word));
-  els.playExample.disabled = !hasAudio(soundName(card, DECK_PROFILE.audio.example));
-
-  els.position.textContent = `${state.index + 1} / ${state.cards.length}`;
-  els.prev.disabled = state.index === 0;
-  els.next.disabled = state.index === state.cards.length - 1;
-}
-
-function flip() {
-  state.flipped = !state.flipped;
-  els.back.hidden = !state.flipped;
-  els.hint.hidden = state.flipped;
-}
-
-function move(delta) {
-  const next = state.index + delta;
-  if (next < 0 || next >= state.cards.length) return;
-  state.index = next;
-  showCard();
-  DeckStore.setLastIndex(state.deckId, next).catch((e) => console.error("位置の保存に失敗", e));
-}
-
 // ---------------------------------------------------------------
 // 音声
 // ---------------------------------------------------------------
@@ -349,21 +469,56 @@ function releaseAudio() {
 }
 
 async function playSound(profileKey) {
-  const card = state.cards[state.index];
-  const name = soundName(card, profileKey);
+  const shown = state.current;
+  if (!shown) return;
+  const name = soundName(shown.card, profileKey);
   if (!hasAudio(name)) return;
 
-  const shownIndex = state.index;
   let url = state.audioUrls.get(name);
   if (!url) {
     const blob = await state.zip.file(state.mediaByName.get(name)).async("blob");
-    if (state.index !== shownIndex) return; // 取り出し中にカードが変わった
+    if (state.current !== shown) return; // 取り出し中にカードが変わった
     url = URL.createObjectURL(new Blob([blob], { type: "audio/mpeg" }));
     state.audioUrls.set(name, url);
   }
   if (state.player) state.player.pause();
   state.player = new Audio(url);
   await state.player.play();
+}
+
+// ---------------------------------------------------------------
+// デバッグ(URL に ?debug=1 を付けたときだけ)
+// ---------------------------------------------------------------
+function initDebug() {
+  if (!DEBUG) return;
+  try {
+    Srs.setOffset(Number(localStorage.getItem(DEBUG_OFFSET_KEY)) || 0);
+  } catch { /* localStorage が使えなくても動く */ }
+  els.debug.hidden = false;
+  updateDebugClock();
+
+  els.debug.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const next = btn.dataset.reset ? 0 : Srs.getOffset() + Number(btn.dataset.addMs);
+    Srs.setOffset(next);
+    try { localStorage.setItem(DEBUG_OFFSET_KEY, String(next)); } catch { /* 無視 */ }
+    updateDebugClock();
+    if (state.deckId) {
+      try {
+        await buildSession(); // 日付が変わるので、今日の導入数なども取り直す
+        advance();
+      } catch (err) { setStatus(describeError(err), true); }
+    }
+  });
+}
+
+function updateDebugClock() {
+  const off = Srs.getOffset();
+  const days = off / 86400000;
+  els.debugClock.textContent =
+    `デバッグ: 仮想現在時刻 ${new Date(Srs.now()).toLocaleString("ja-JP")}` +
+    (off ? `(実際より +${Math.round(days * 100) / 100}日)` : "");
 }
 
 // ---------------------------------------------------------------
@@ -388,8 +543,43 @@ els.backToLibrary.addEventListener("click", async () => {
   try { await renderLibrary(); } catch (e) { setStatus(describeError(e), true); }
 });
 
-// 起動時: 永続化を要求し、保存済みデッキの一覧を出す
+els.card.addEventListener("click", revealAnswer);
+els.showAnswer.addEventListener("click", revealAnswer);
+for (const btn of els.gradeButtons) {
+  btn.addEventListener("click", () => gradeCurrent(Number(btn.dataset.grade)));
+}
+els.playWord.addEventListener("click", () =>
+  playSound(DECK_PROFILE.audio.word).catch((e) => setStatus("再生できません: " + e.message, true)));
+els.playExample.addEventListener("click", () =>
+  playSound(DECK_PROFILE.audio.example).catch((e) => setStatus("再生できません: " + e.message, true)));
+
+// キーボード(PC): Space=答えを見る、1〜4=もう一度/難しい/正解/簡単
+document.addEventListener("keydown", (e) => {
+  if (els.viewer.hidden || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+  if (e.code === "Space") {
+    if (state.current && !state.revealed) {
+      e.preventDefault();
+      revealAnswer();
+    }
+  } else if (["1", "2", "3", "4"].includes(e.key)) {
+    if (state.revealed) {
+      e.preventDefault();
+      gradeCurrent(Number(e.key));
+    }
+  }
+});
+
+// 「今日の学習は終わりです」の画面で、数分後に学習中カードの期限が来たら自動で再開する
+setInterval(() => {
+  if (DEBUG) updateDebugClock();
+  if (state.session && !els.done.hidden && !state.busy) advance();
+}, 15000);
+
+// 起動時: デバッグ設定、永続化の要求、保存済みデッキの一覧
 (async () => {
+  initDebug();
   try {
     await renderLibrary();
     await updatePersistStatus();
@@ -398,11 +588,3 @@ els.backToLibrary.addEventListener("click", async () => {
     setStatus("保存データを開けませんでした: " + describeError(e), true);
   }
 })();
-
-els.card.addEventListener("click", flip);
-els.prev.addEventListener("click", () => move(-1));
-els.next.addEventListener("click", () => move(1));
-els.playWord.addEventListener("click", () =>
-  playSound(DECK_PROFILE.audio.word).catch((e) => setStatus("再生できません: " + e.message, true)));
-els.playExample.addEventListener("click", () =>
-  playSound(DECK_PROFILE.audio.example).catch((e) => setStatus("再生できません: " + e.message, true)));

@@ -6,16 +6,20 @@
 // ストア構成 (DB "anki-pwa" version 1)
 //   decks        key: id(文字列)          {id, name, cardCount, size, addedAt, lastOpenedAt}
 //   deckFiles    key: deckId              {deckId, blob}   .apkg の Blob そのまま
-//   progress     key: deckId              {deckId, lastIndex, updatedAt}
-//   cardRecords  key: [deckId, cardId]    次ミッション用(カードごとの学習記録)。今は空。
-//                                         レコードは {deckId, cardId, ...学習記録} の形にする
+//   progress     key: deckId              旧「最後に見た位置」。復習画面では使わない(残してあるだけ)
+//   cardRecords  key: [deckId, cardId]    カードごとの FSRS の状態(srs.js の record)。
+//                                         記録が無いカード = 新規
+//   reviewLogs   key: 自動採番            回答の履歴(いつ・どのボタン)。deckId, cardId, rating, review(ms) ...
 //
+// decks のレコードには、デッキごとの設定 newPerDay(新規の1日の上限)が入ることがある。
 // 一覧取得で大きい Blob を読まないよう、decks と deckFiles は分けてある。
+//
+// version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
 // ---------------------------------------------------------------
 const DeckStore = (() => {
   const DB_NAME = "anki-pwa";
-  const DB_VERSION = 1;
-  const ALL_STORES = ["decks", "deckFiles", "progress", "cardRecords"];
+  const DB_VERSION = 2;
+  const ALL_STORES = ["decks", "deckFiles", "progress", "cardRecords", "reviewLogs"];
 
   let dbPromise = null;
 
@@ -37,7 +41,11 @@ const DeckStore = (() => {
         if (!db.objectStoreNames.contains("cardRecords")) {
           const s = db.createObjectStore("cardRecords", { keyPath: ["deckId", "cardId"] });
           s.createIndex("byDeck", "deckId");
-          // 復習日の index([deckId, due] など)は、次ミッションで version 2 として追加する
+        }
+        if (!db.objectStoreNames.contains("reviewLogs")) {
+          const s = db.createObjectStore("reviewLogs", { keyPath: "id", autoIncrement: true });
+          s.createIndex("byDeck", "deckId");
+          s.createIndex("byDeckTime", ["deckId", "review"]);
         }
       };
       req.onsuccess = () => {
@@ -81,6 +89,8 @@ const DeckStore = (() => {
     stores.deckFiles.delete(id);
     stores.progress.delete(id);
     stores.cardRecords.delete(IDBKeyRange.bound([id, -Infinity], [id, Infinity]));
+    const logKeys = await reqToPromise(stores.reviewLogs.index("byDeck").getAllKeys(IDBKeyRange.only(id)));
+    for (const k of logKeys) stores.reviewLogs.delete(k);
   }
 
   // -------------------------------------------------------------
@@ -95,15 +105,18 @@ const DeckStore = (() => {
     return { supported: true, persisted };
   }
 
-  // 保存済みデッキの一覧(Blob は読まない)。lastIndex は未学習なら null。
+  // 保存済みデッキの一覧(Blob は読まない)。learnedCount = 学習記録のあるカード数。
   async function listDecks() {
-    const [decks, progress] = await run(["decks", "progress"], "readonly", (s) =>
-      Promise.all([reqToPromise(s.decks.getAll()), reqToPromise(s.progress.getAll())])
-    );
-    const lastIndexById = new Map(progress.map((p) => [p.deckId, p.lastIndex]));
-    return decks
-      .map((d) => ({ ...d, lastIndex: lastIndexById.get(d.id) ?? null }))
-      .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+    return run(["decks", "cardRecords"], "readonly", async (s) => {
+      const decks = await reqToPromise(s.decks.getAll());
+      const byDeck = s.cardRecords.index("byDeck");
+      const counts = await Promise.all(
+        decks.map((d) => reqToPromise(byDeck.count(IDBKeyRange.only(d.id))))
+      );
+      return decks
+        .map((d, i) => ({ ...d, learnedCount: counts[i] }))
+        .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+    });
   }
 
   // id が同じ、または名前が同じ保存済みデッキ(複数ありうる)
@@ -113,7 +126,7 @@ const DeckStore = (() => {
   }
 
   // デッキを保存する。replaceIds に入れた既存デッキは同じトランザクション内で置き換える。
-  //  - id が同じ既存デッキ: 進み具合と cardRecords を引き継ぐ(位置はカード数に丸める)
+  //  - id が同じ既存デッキ: 学習記録・回答履歴・新規の上限設定を引き継ぐ
   //  - id が違う既存デッキ(名前だけ一致): 全データを削除し、新規として扱う
   // 途中で失敗(容量不足など)したら全体がロールバックされる。
   async function saveDeck(meta, blob, { replaceIds = [] } = {}) {
@@ -132,15 +145,9 @@ const DeckStore = (() => {
         size: blob.size,
         addedAt: existing?.addedAt ?? now,
         lastOpenedAt: now,
+        ...(existing?.newPerDay != null && { newPerDay: existing.newPerDay }),
       });
       s.deckFiles.put({ deckId: meta.id, blob });
-
-      if (existing) {
-        const p = await reqToPromise(s.progress.get(meta.id));
-        if (p && p.lastIndex > meta.cardCount - 1) {
-          s.progress.put({ ...p, lastIndex: Math.max(0, meta.cardCount - 1), updatedAt: now });
-        }
-      }
     });
   }
 
@@ -156,15 +163,42 @@ const DeckStore = (() => {
     });
   }
 
-  async function getLastIndex(id) {
-    const p = await run(["progress"], "readonly", (s) => reqToPromise(s.progress.get(id)));
-    return p?.lastIndex ?? null;
+  // 新規カードの1日の上限(未設定なら null)
+  async function getNewPerDay(id) {
+    const d = await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)));
+    return d?.newPerDay ?? null;
   }
 
-  async function setLastIndex(id, lastIndex) {
-    await run(["progress"], "readwrite", (s) => {
-      s.progress.put({ deckId: id, lastIndex, updatedAt: Date.now() });
+  async function setNewPerDay(id, n) {
+    await run(["decks"], "readwrite", async (s) => {
+      const d = await reqToPromise(s.decks.get(id));
+      if (d) s.decks.put({ ...d, newPerDay: n });
     });
+  }
+
+  // デッキの全カードの学習記録
+  async function getCardRecords(deckId) {
+    return run(["cardRecords"], "readonly", (s) =>
+      reqToPromise(s.cardRecords.index("byDeck").getAll(IDBKeyRange.only(deckId)))
+    );
+  }
+
+  // 回答を保存する: 学習記録の更新と回答履歴の追加を 1 トランザクションで行う
+  async function saveReview(deckId, record, log) {
+    await run(["cardRecords", "reviewLogs"], "readwrite", (s) => {
+      s.cardRecords.put({ ...record, deckId });
+      s.reviewLogs.add({ ...log, deckId });
+    });
+  }
+
+  // [fromMs, toMs) に導入(初回回答)された新規カードの数
+  async function countNewSince(deckId, fromMs, toMs) {
+    const logs = await run(["reviewLogs"], "readonly", (s) =>
+      reqToPromise(
+        s.reviewLogs.index("byDeckTime").getAll(IDBKeyRange.bound([deckId, fromMs], [deckId, toMs], false, true))
+      )
+    );
+    return logs.filter((l) => l.state === 0).length; // state 0 = 回答前が New
   }
 
   // デッキと、その進み具合・学習記録を全て削除する(1トランザクション)
@@ -174,6 +208,7 @@ const DeckStore = (() => {
 
   return {
     requestPersistence, listDecks, findDuplicates, saveDeck,
-    getDeckBlob, touchDeck, getLastIndex, setLastIndex, deleteDeck,
+    getDeckBlob, touchDeck, deleteDeck,
+    getNewPerDay, setNewPerDay, getCardRecords, saveReview, countNewSince,
   };
 })();
