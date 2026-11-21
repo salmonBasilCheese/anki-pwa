@@ -10,7 +10,7 @@ Anki 互換の単語学習 PWA。iPhone のホーム画面から使う。
 - デッキ（.apkg）は別プロジェクト vocabulary-builder で作り、AirDrop で渡す。このリポジトリでは扱わない
 
 ## 構成
-- 静的ファイルのみ（index.html / app.js / srs.js / storage.js / sw.js / manifest.webmanifest）
+- 静的ファイルのみ（index.html / app.js / srs.js / storage.js / backup.js / sw.js / manifest.webmanifest）
 - 外部ライブラリは CDN から読まず lib/ に置く
 - 保存は storage.js（IndexedDB。バージョンは storage.js の DB_VERSION）
 - キャッシュは sw.js（バージョンは sw.js の CACHE_VERSION）
@@ -35,12 +35,11 @@ Anki 互換の単語学習 PWA。iPhone のホーム画面から使う。
 - 終わったら、iPhone での確認方法を説明する
 
 ## 今後の予定（順番どおりに 1 つずつ進める）
-1. 学習記録の書き出し・読み込み（バックアップ）
-2. 開発版と安定版の分離（子どもは安定版を使う）
-3. デッキごとの設定画面
+1. 開発版と安定版の分離（子どもは安定版を使う）
+2. デッキごとの設定画面
    - 1日の新規枚数
    - 表裏に表示するフィールドの選択
    - IPA の表示切り替え（子ども用デッキは初期設定で非表示）
    - 文字サイズ
-4. 続ける工夫（連続学習日数、今日の残り枚数）
-5. 子どもの iPhone への導入手順書（ホーム画面への追加、デッキの取り込み、リマインダーの設定）
+3. 続ける工夫（連続学習日数、今日の残り枚数）
+4. 子どもの iPhone への導入手順書（ホーム画面への追加、デッキの取り込み、リマインダーの設定）
