@@ -124,6 +124,27 @@ test("回答履歴は、端末にある分と(カード,時刻)が同じなら�
   assert.equal(p.totals.logsDup, 2, "(1,100) と、ファイル内の重複 (2,100)");
 });
 
+test("IPA 表示(showIpa)は往復で保たれ、端末に設定が無いときだけ反映する", () => {
+  const mk = (v) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: null, showIpa: v, records: [], logs: [] }])).backup;
+  assert.equal(mk(false).decks[0].showIpa, false);
+  assert.equal(mk(true).decks[0].showIpa, true);
+  assert.deepEqual(Backup.plan(mk(false), [localDeck()]).writes.showIpa, [{ deckId: "D1", value: false }]);
+  assert.equal(Backup.plan(mk(false), [localDeck()]).hasChanges, true);
+  assert.equal(Backup.plan(mk(false), [localDeck({ showIpa: true })]).writes.showIpa.length, 0, "端末に設定があれば上書きしない");
+  assert.equal(Backup.plan(mk(null), [localDeck()]).writes.showIpa.length, 0, "バックアップに設定が無ければ何もしない");
+  assert.match(Backup.describe(Backup.plan(mk(false), [localDeck()]), { done: false }), /IPA の表示: 表示しない/);
+});
+
+test("showIpa の無い古い形式のバックアップも読める。真偽値以外は拒否する", () => {
+  const old = JSON.parse(JSON.stringify(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: 5, records: [], logs: [] }])));
+  for (const d of old.decks) delete d.showIpa;
+  const r = Backup.validate(old);
+  assert.equal(r.ok, true);
+  assert.equal(r.backup.decks[0].showIpa, null);
+  old.decks[0].showIpa = "yes";
+  assert.equal(Backup.validate(old).ok, false);
+});
+
 test("新規上限(newPerDay)は端末に設定が無いときだけ反映する", () => {
   const mk = (n) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: n, records: [], logs: [] }])).backup;
   assert.equal(Backup.plan(mk(30), [localDeck({ newPerDay: null })]).writes.newPerDay.length, 1);

@@ -55,6 +55,7 @@ const state = {
   cards: [],              // 並び順どおりの { id, fields: {フィールド名: 値} }
   cardById: new Map(),
   session: null,          // srs.js のセッション(出題状態)
+  showIpa: true,          // 学習中のデッキで IPA を表示するか(デッキごとの設定)
   current: null,          // 今出しているカード { cardId, kind, record, card }
   revealed: false,
   busy: false,            // 回答の保存中
@@ -195,7 +196,7 @@ async function renderLibrary() {
     meta.className = "deck-meta";
     meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚`;
 
-    li.append(name, meta, buildLimitInput(d));
+    li.append(name, meta);
 
     const actions = document.createElement("div");
     actions.className = "deck-actions";
@@ -209,11 +210,52 @@ async function renderLibrary() {
     delBtn.className = "danger";
     delBtn.textContent = "削除";
     delBtn.addEventListener("click", () => removeDeck(d));
-    actions.append(openBtn, delBtn);
+    const settingsBtn = document.createElement("button");
+    settingsBtn.type = "button";
+    settingsBtn.textContent = "設定";
+    settingsBtn.setAttribute("aria-expanded", "false");
+    const panel = buildSettingsPanel(d);
+    panel.hidden = true;
+    settingsBtn.addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+      settingsBtn.setAttribute("aria-expanded", String(!panel.hidden));
+    });
+    actions.append(openBtn, settingsBtn, delBtn);
 
-    li.append(actions);
+    li.append(actions, panel);
     els.deckList.appendChild(li);
   }
+}
+
+// デッキごとの設定(「設定」ボタンで開く)。項目を足すときはここに並べる。
+function buildSettingsPanel(d) {
+  const panel = document.createElement("div");
+  panel.className = "deck-settings";
+  panel.append(buildLimitInput(d), buildIpaToggle(d));
+  return panel;
+}
+
+// IPA を表示するか(デッキごと。未設定は表示)
+function buildIpaToggle(d) {
+  const label = document.createElement("label");
+  label.className = "deck-toggle";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  let saved = d.showIpa !== false;
+  box.checked = saved;
+  box.addEventListener("change", async () => {
+    const want = box.checked;
+    try {
+      await DeckStore.setShowIpa(d.id, want);
+      saved = want;
+    } catch (e) {
+      console.error(e);
+      box.checked = saved;
+      setStatus("設定を保存できませんでした: " + describeError(e), true);
+    }
+  });
+  label.append(box, "IPA(発音記号)を表示する");
+  return label;
 }
 
 // 新規カードの1日の上限(デッキごと)
@@ -496,11 +538,13 @@ async function startStudy(parsed) {
 async function buildSession() {
   const id = state.deckId;
   const nowMs = Srs.now();
-  const [records, limit, newToday] = await Promise.all([
+  const [records, limit, showIpa, newToday] = await Promise.all([
     DeckStore.getCardRecords(id),
     DeckStore.getNewPerDay(id),
+    DeckStore.getShowIpa(id),
     DeckStore.countNewSince(id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
   ]);
+  state.showIpa = showIpa;
   state.session = Srs.createSession({
     cards: state.cards,
     records: records.filter((r) => state.cardById.has(r.cardId)), // デッキに無いカードの記録は無視
@@ -542,7 +586,7 @@ function advance() {
   state.current = { ...pick, card };
 
   renderSide(els.front, DECK_PROFILE.front, card);
-  renderSide(els.back, DECK_PROFILE.back, card);
+  renderSide(els.back, state.showIpa ? DECK_PROFILE.back : DECK_PROFILE.back.filter((k) => k !== "ipa"), card);
   els.back.hidden = true;
   els.grades.hidden = true;
   els.showAnswer.hidden = false;

@@ -7,7 +7,7 @@
 //
 // バックアップファイル(JSON) schemaVersion 1
 //   { app: "anki-pwa-backup", schemaVersion: 1, exportedAt: ms,
-//     decks: [ { id, name, newPerDay: 整数|null,
+//     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null(省略可。古いファイルには無い),
 //                cardRecords: [ srs.js の record(形は srs.js の先頭コメント。deckId は持たない) ],
 //                reviewLogs:  [ 回答履歴(deckId・自動採番の id は持たない) ] } ] }
 // 含めないもの: .apkg 本体・教材の中身(カードの内容)。
@@ -58,7 +58,7 @@ const Backup = (() => {
   }
 
   // ---- 書き出し用: 端末のデータからバックアップの形を作る ----
-  // decks: [{ id, name, newPerDay, records, logs }]
+  // decks: [{ id, name, newPerDay, showIpa, records, logs }]
   function build({ decks, now }) {
     const pickRecord = (r) => ({
       cardId: r.cardId, state: r.state, due: r.due,
@@ -79,6 +79,7 @@ const Backup = (() => {
         id: d.id,
         name: d.name,
         newPerDay: d.newPerDay ?? null,
+        showIpa: typeof d.showIpa === "boolean" ? d.showIpa : null,
         cardRecords: d.records.map(pickRecord),
         reviewLogs: d.logs.map(pickLog),
       })),
@@ -125,6 +126,9 @@ const Backup = (() => {
       if (d.newPerDay != null && (!isInt(d.newPerDay) || d.newPerDay < 0 || d.newPerDay > 999)) {
         return { ok: false, error: `${at} の新規上限が正しくありません` };
       }
+      if (d.showIpa != null && typeof d.showIpa !== "boolean") {
+        return { ok: false, error: `${at} の IPA 表示の設定が正しくありません` };
+      }
       if (!Array.isArray(d.cardRecords) || !Array.isArray(d.reviewLogs)) {
         return { ok: false, error: `${at} の学習記録が読み取れません` };
       }
@@ -140,7 +144,7 @@ const Backup = (() => {
         if (!c) return { ok: false, error: `${at}.reviewLogs[${j}] の形式が正しくありません` };
         reviewLogs.push(c);
       }
-      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, cardRecords, reviewLogs });
+      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, cardRecords, reviewLogs });
     }
 
     return {
@@ -156,13 +160,13 @@ const Backup = (() => {
   const isNewer = (incoming, existing) => !existing || lastReviewOf(incoming) > lastReviewOf(existing);
 
   // backup: validate 済み。
-  // local: 端末の全デッキ [{ id, name, newPerDay, records, logs, cardIds }]
+  // local: 端末の全デッキ [{ id, name, newPerDay, showIpa, records, logs, cardIds }]
   //   records/logs/cardIds が要るのは、バックアップにも含まれるデッキだけ。
   //   cardIds = そのデッキ(.apkg)に実在するカード ID の Set。
-  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, logs, newPerDay }, hasChanges }
+  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, logs, newPerDay, showIpa }, hasChanges }
   function plan(backup, local) {
     const localById = new Map(local.map((d) => [d.id, d]));
-    const writes = { records: [], logs: [], newPerDay: [] };
+    const writes = { records: [], logs: [], newPerDay: [], showIpa: [] };
     const decks = [];
     const totals = {
       recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
@@ -192,7 +196,7 @@ const Backup = (() => {
       const d = {
         id: bd.id, name: ld.name, status: "ok",
         recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
-        orphanCards: 0, orphanLogs: 0, newPerDayApplied: null,
+        orphanCards: 0, orphanLogs: 0, newPerDayApplied: null, showIpaApplied: null,
       };
 
       // バックアップ内に同じカードが複数あれば、新しいほうだけを使う
@@ -228,6 +232,12 @@ const Backup = (() => {
         d.newPerDayApplied = bd.newPerDay;
       }
 
+      // IPA の表示: 同じく、端末に設定が無いときだけ反映する
+      if (typeof bd.showIpa === "boolean" && ld.showIpa == null) {
+        writes.showIpa.push({ deckId: bd.id, value: bd.showIpa });
+        d.showIpaApplied = bd.showIpa;
+      }
+
       d.orphanCards = orphan.size;
       decks.push(d);
       totals.recordsApply += d.recordsApply;
@@ -239,7 +249,7 @@ const Backup = (() => {
     }
 
     const hasChanges =
-      writes.records.length > 0 || writes.logs.length > 0 || writes.newPerDay.length > 0;
+      writes.records.length > 0 || writes.logs.length > 0 || writes.newPerDay.length > 0 || writes.showIpa.length > 0;
     return { decks, totals, writes, hasChanges };
   }
 
@@ -261,6 +271,7 @@ const Backup = (() => {
       lines.push(`  回答履歴: ${n(d.logsAdd)} 件を追加${done ? "しました" : "します"}` +
         (d.logsDup ? ` (${n(d.logsDup)} 件は登録済み)` : ""));
       if (d.newPerDayApplied != null) lines.push(`  新規カード/日: ${d.newPerDayApplied} を反映${done ? "しました" : "します"}`);
+      if (d.showIpaApplied != null) lines.push(`  IPA の表示: ${d.showIpaApplied ? "表示する" : "表示しない"} を反映${done ? "しました" : "します"}`);
       if (d.orphanCards > 0) {
         lines.push(`  ⚠ ${n(d.orphanCards)} 枚は該当カードなしでスキップ` +
           (d.orphanLogs ? `(履歴 ${n(d.orphanLogs)} 件を含む)` : "") +
