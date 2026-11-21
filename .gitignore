@@ -1,1 +1,7 @@
 data/
+*.apkg
+*.colpkg
+*.anki2
+*.mp3
+*.pdf
+*.epub
