@@ -4,8 +4,13 @@
 // アプリを更新したら、この番号を上げる(v1 → v2 ...)。
 // 番号が変わると新しいキャッシュが作られ、古いキャッシュは削除される。
 // ---------------------------------------------------------------
-const CACHE_VERSION = "v3";
-const CACHE_NAME = `anki-pwa-${CACHE_VERSION}`;
+const CACHE_VERSION = "v4";
+
+// 版: 公開 URL のパスに /dev/ を含めば開発版。同じオリジンの安定版のキャッシュを消さないよう、
+// 開発版のキャッシュ名は "anki-pwa-" で始めない(安定版は "anki-pwa-" で始まるキャッシュを整理するため)。
+const CHANNEL = self.location.pathname.includes("/dev/") ? "dev" : "stable";
+const CACHE_PREFIX = CHANNEL === "dev" ? "dev-anki-pwa-" : "anki-pwa-";
+const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`;
 
 // オフラインで必要なファイルの一覧(すべて、この sw.js からの相対パス)。
 // ファイルを足したら、ここにも足すこと。足し忘れは `node tools/check_pwa.mjs` で検出できる。
@@ -48,7 +53,7 @@ self.addEventListener("activate", (event) => {
       const names = await caches.keys();
       await Promise.all(
         names
-          .filter((n) => n.startsWith("anki-pwa-") && n !== CACHE_NAME)
+          .filter((n) => n.startsWith(CACHE_PREFIX) && n !== CACHE_NAME)
           .map((n) => caches.delete(n))
       );
       await self.clients.claim();

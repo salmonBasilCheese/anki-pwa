@@ -16,11 +16,16 @@
 //
 // version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
 //
+// 版(channel): 公開 URL のパスに /dev/ を含めば開発版("dev")、それ以外は安定版("stable")。
+// 同じオリジンでは IndexedDB・localStorage・キャッシュを共有してしまうため、開発版は保存先の
+// 名前を分ける(開発版の DB は "anki-pwa-dev")。安定版の名前は従来のまま変えない。
+//
 // バックアップ(exportAll / importMerge)は backup.js(グローバル `Backup`)と組で使う。
 // ストアの構造は変えない。
 // ---------------------------------------------------------------
 const DeckStore = (() => {
-  const DB_NAME = "anki-pwa";
+  const CHANNEL = location.pathname.includes("/dev/") ? "dev" : "stable";
+  const DB_NAME = CHANNEL === "dev" ? "anki-pwa-dev" : "anki-pwa";
   const DB_VERSION = 2;
   const ALL_STORES = ["decks", "deckFiles", "progress", "cardRecords", "reviewLogs"];
 
@@ -268,5 +273,6 @@ const DeckStore = (() => {
     getDeckBlob, touchDeck, deleteDeck,
     getNewPerDay, setNewPerDay, getCardRecords, saveReview, countNewSince,
     exportAll, importMerge,
+    channel: CHANNEL,
   };
 })();

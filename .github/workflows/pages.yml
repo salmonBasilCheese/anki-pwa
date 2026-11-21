@@ -1,0 +1,50 @@
+# 公開用のサイトを組み立てて GitHub Pages に公開する。
+#   stable ブランチ → 公開 URL の直下(子どもたちが使う安定版)
+#   main ブランチ   → 公開 URL の /dev/(開発版)
+# このファイルは main にだけある。main への push、または手動実行(workflow_dispatch)で動く。
+# 安定版を更新したとき(stable を進めて push したあと)は、Actions の「Deploy Pages」を
+# main で手動実行する(gh workflow run pages.yml --ref main)。
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stable
+          path: stable
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: dev
+      - name: Run checks (dev)
+        run: |
+          node dev/tools/check_backup.mjs
+          node dev/tools/check_pwa.mjs
+          node dev/tools/check_site.mjs
+      - name: Build site
+        run: node dev/tools/build_site.mjs --stable stable --dev dev --out _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -27,7 +27,10 @@ const AUDIO_ICON =
   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
 
 const DEBUG = new URLSearchParams(location.search).get("debug") === "1";
-const DEBUG_OFFSET_KEY = "anki-pwa-debug-offset-ms";
+// 開発版は localStorage のキーも分ける(同じオリジンの安定版と共有しないため)
+const IS_DEV = DeckStore.channel === "dev";
+const KEY_PREFIX = IS_DEV ? "dev-" : "";
+const DEBUG_OFFSET_KEY = KEY_PREFIX + "anki-pwa-debug-offset-ms";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -320,7 +323,7 @@ async function removeDeck(d) {
 // ---------------------------------------------------------------
 // 「最後のバックアップ」の日時。表示のためだけの目印なので localStorage に置く
 // (消えても学習記録には影響せず、「未実施」と表示されるだけ)。
-const LAST_BACKUP_KEY = "anki-pwa-last-backup-ms";
+const LAST_BACKUP_KEY = KEY_PREFIX + "anki-pwa-last-backup-ms";
 
 function getLastBackup() {
   try {
@@ -405,7 +408,7 @@ async function exportBackup() {
     }
     const summary = `${c.decks} デッキ・カード ${c.cards.toLocaleString("ja-JP")} 枚・履歴 ${c.logs.toLocaleString("ja-JP")} 件`;
     setStatus(`書き出し中: ${summary}`);
-    const file = new File([JSON.stringify(backup)], `anki-pwa-backup-${dateStamp(now)}.json`, { type: "application/json" });
+    const file = new File([JSON.stringify(backup)], `anki-pwa-${IS_DEV ? "dev-" : ""}backup-${dateStamp(now)}.json`, { type: "application/json" });
     if (await shareOrDownload(file)) {
       setLastBackup(now);
       renderBackupStatus();
@@ -783,7 +786,7 @@ async function showVersion() {
     return;
   }
   const v = await askServiceWorkerVersion();
-  els.version.textContent = v ? `アプリのバージョン: ${v}` : "アプリのバージョン: 確認できません";
+  els.version.textContent = v ? `アプリのバージョン: ${v}${IS_DEV ? "(開発版)" : ""}` : "アプリのバージョン: 確認できません";
 }
 
 // ---------------------------------------------------------------
@@ -882,6 +885,11 @@ function initServiceWorker() {
   let waiting = null;
   let updateRequested = false;
 
+  // 「更新」として扱うのは、今このページを制御している Service Worker の新しい版だけ。
+  // 同じオリジンの別の版(安定版と開発版)の Service Worker が制御している間は、更新ではない。
+  const isUpdateOfController = (worker) =>
+    navigator.serviceWorker.controller?.scriptURL === worker.scriptURL;
+
   const offerUpdate = (worker) => {
     waiting = worker;
     banner.hidden = false;
@@ -904,14 +912,14 @@ function initServiceWorker() {
 
   navigator.serviceWorker.register("sw.js").then((reg) => {
     // すでに待機中の更新がある(前回見つけたが、まだ切り替えていない)
-    if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg.waiting);
+    if (reg.waiting && isUpdateOfController(reg.waiting)) offerUpdate(reg.waiting);
 
     reg.addEventListener("updatefound", () => {
       const worker = reg.installing;
       if (!worker) return;
       worker.addEventListener("statechange", () => {
         // controller があるときだけ「更新」。無いときは初回インストールなので通知しない
-        if (worker.state === "installed" && navigator.serviceWorker.controller) offerUpdate(worker);
+        if (worker.state === "installed" && isUpdateOfController(worker)) offerUpdate(worker);
       });
     });
 
@@ -924,6 +932,7 @@ function initServiceWorker() {
 
 // 起動時: デバッグ設定、Service Worker、永続化の要求、保存済みデッキの一覧
 (async () => {
+  if (IS_DEV) $("dev-badge").hidden = false;
   initDebug();
   updateDebugViewport();
   initServiceWorker();

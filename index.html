@@ -75,6 +75,7 @@
     }
     #persist-status { color: var(--text-faint); font-size: 0.85rem; margin: 8px 0; }
     #app-version { color: var(--text-faint); font-size: 0.85rem; margin: 16px 0 0; }
+    #dev-badge { background: #4a2a6e; color: #f0e6ff; border-radius: var(--radius); padding: 8px 12px; margin: 0 0 10px; font-size: 0.85rem; }
     #backup-last { color: var(--text-muted); font-size: 0.9rem; margin: 0 0 10px; }
     #backup-actions { display: flex; gap: 10px; }
     #backup-actions button { flex: 1; }
@@ -209,6 +210,7 @@
     <span>新しいバージョンがあります</span>
     <button id="update-btn" type="button">更新</button>
   </div>
+  <div id="dev-badge" hidden>開発版です。学習記録は安定版とは別に保存されます。</div>
   <div id="status"></div>
 
   <div id="library">
