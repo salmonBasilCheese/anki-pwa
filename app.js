@@ -46,7 +46,7 @@ const els = {
 const state = {
   deckId: null,           // 学習中のデッキID(保存済みデッキのキー)
   zip: null,
-  mediaByName: new Map(), // "svl2k_3001_w.mp3" -> "123"(zip内のファイル名)
+  mediaByName: new Map(), // "example_0001.mp3" -> "123"(zip内のファイル名)
   cards: [],              // 並び順どおりの { id, fields: {フィールド名: 値} }
   cardById: new Map(),
   session: null,          // srs.js のセッション(出題状態)
@@ -92,7 +92,7 @@ async function parseApkg(blob) {
 }
 
 async function readCollection(db, zip) {
-  // media: { "0": "svl2k_3001_w.mp3", ... } を逆引きにする
+  // media: { "0": "example_0001.mp3", ... } を逆引きにする
   const mediaByName = new Map();
   const mediaEntry = zip.file("media");
   if (mediaEntry) {
