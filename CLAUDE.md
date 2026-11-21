@@ -14,7 +14,24 @@ Anki 互換の単語学習 PWA。iPhone のホーム画面から使う。
 - 外部ライブラリは CDN から読まず lib/ に置く
 - 保存は storage.js（IndexedDB。バージョンは storage.js の DB_VERSION）
 - キャッシュは sw.js（バージョンは sw.js の CACHE_VERSION）
-- tools/ は開発補助
+- tools/ は開発補助（check_*.mjs はテスト、build_site.mjs は公開サイトの組み立て、make_icons.py はアイコン生成）
+- icons-dev/ は開発版用の紫のアイコン（公開サイトには入れない）
+- .github/workflows/pages.yml が公開サイトを組み立てて GitHub Pages に公開する
+
+## 版の運用（開発版と安定版）
+- 子どもたちは安定版を使う。安定版は `stable` ブランチで、URL は直下（今までと同じ）。開発版は `main` ブランチで、URL は `/dev/`
+- 同じ github.io のオリジンなので、保存先の名前で版を分ける。URL に `/dev/` を含むかどうかで版を判定する
+  - 安定版: IndexedDB `anki-pwa`、キャッシュ名 `anki-pwa-` 始まり、localStorage は接頭辞なし
+  - 開発版: IndexedDB `anki-pwa-dev`、キャッシュ名 `dev-anki-pwa-` 始まり、localStorage は `dev-` 接頭辞
+  - 安定版の名前（特に DB 名）は絶対に変えない。変えると子どもの記録が見えなくなる
+- 開発版は見た目も違う（紫のアイコン、アプリ名「Anki Dev」、「開発版です」バッジ）
+- `stable` は force push と削除を禁止している。進める（fast-forward）ときだけ push できる
+- 安定版へ昇格する手順（必ずユーザーの OK を取ってから）
+  1. `main` で tools/check_*.mjs をすべて通し、`/dev/` を iPhone で確認する
+  2. CACHE_VERSION を上げ、DB_VERSION を上げたなら移行処理とテストがあることを確認する
+  3. `stable` を `main` へ fast-forward して push する
+  4. workflow は `main` でしか動かないので、`gh workflow run pages.yml --ref main` で公開を更新する
+  5. 直下の URL を確認する（バージョン表示、既存のデッキと記録が残っていること）
 
 ## 守るべきルール
 - このリポジトリは公開されている。家族・地域・端末・教材が特定できる情報を書かない（CLAUDE.md、コード、コメント、コミットメッセージすべて）
@@ -35,11 +52,10 @@ Anki 互換の単語学習 PWA。iPhone のホーム画面から使う。
 - 終わったら、iPhone での確認方法を説明する
 
 ## 今後の予定（順番どおりに 1 つずつ進める）
-1. 開発版と安定版の分離（子どもは安定版を使う）
-2. デッキごとの設定画面
+1. デッキごとの設定画面
    - 1日の新規枚数
    - 表裏に表示するフィールドの選択
    - IPA の表示切り替え（子ども用デッキは初期設定で非表示）
    - 文字サイズ
-3. 続ける工夫（連続学習日数、今日の残り枚数）
-4. 子どもの iPhone への導入手順書（ホーム画面への追加、デッキの取り込み、リマインダーの設定）
+2. 続ける工夫（連続学習日数、今日の残り枚数）
+3. 子どもの iPhone への導入手順書（ホーム画面への追加、デッキの取り込み、リマインダーの設定）
