@@ -35,7 +35,7 @@ for (const f of precache) {
 for (const f of [...files("lib"), ...files("icons")]) {
   check(precache.includes(f), `on disk and precached: ${f}`);
 }
-for (const f of ["index.html", "app.js", "storage.js", "srs.js", "manifest.webmanifest"]) {
+for (const f of ["index.html", "app.js", "storage.js", "backup.js", "srs.js", "manifest.webmanifest"]) {
   check(precache.includes(f), `core file precached: ${f}`);
 }
 check(precache.includes("./"), "start URL './' precached");
@@ -49,7 +49,7 @@ for (const m of html.matchAll(/<script[^>]+src="([^"]+)"/g)) {
 check(/rel="manifest"\s+href="manifest\.webmanifest"/.test(html), "index.html links the manifest");
 const abs = [...html.matchAll(/(?:src|href)="(\/[^"]*)"/g)].map((m) => m[1]);
 check(abs.length === 0, `no absolute paths in index.html ${abs.join(",")}`);
-for (const f of ["app.js", "storage.js", "srs.js", "sw.js"]) {
+for (const f of ["app.js", "storage.js", "backup.js", "srs.js", "sw.js"]) {
   const bad = [...read(f).matchAll(/(?:fetch|register)\(\s*["'`](\/[^"'`]*)/g)].map((m) => m[1]);
   check(bad.length === 0, `no absolute fetch/register paths in ${f} ${bad.join(",")}`);
 }

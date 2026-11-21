@@ -75,6 +75,11 @@
     }
     #persist-status { color: var(--text-faint); font-size: 0.85rem; margin: 8px 0; }
     #app-version { color: var(--text-faint); font-size: 0.85rem; margin: 16px 0 0; }
+    #backup-last { color: var(--text-muted); font-size: 0.9rem; margin: 0 0 10px; }
+    #backup-actions { display: flex; gap: 10px; }
+    #backup-actions button { flex: 1; }
+    #backup-result { white-space: pre-line; overflow-wrap: anywhere; color: var(--text-muted); font-size: 0.9rem; margin: 10px 0 0; }
+    #backup-result:empty { display: none; }
     #deck-list { list-style: none; margin: 0; padding: 0; }
     #deck-list .empty { color: var(--text-muted); }
     .deck-row {
@@ -212,6 +217,14 @@
     <div id="persist-status"></div>
     <h2>保存済みデッキ</h2>
     <ul id="deck-list"></ul>
+    <h2>バックアップ</h2>
+    <div id="backup-last"></div>
+    <div id="backup-actions">
+      <button type="button" id="backup-export">書き出す</button>
+      <button type="button" id="backup-import">読み込む</button>
+    </div>
+    <input type="file" id="backup-file" accept=".json,application/json" hidden>
+    <div id="backup-result"></div>
     <div id="app-version"></div>
   </div>
 
@@ -266,6 +279,7 @@
   <script src="lib/sql-wasm.js"></script>
   <script src="lib/purify.min.js"></script>
   <script src="lib/ts-fsrs.umd.js"></script>
+  <script src="backup.js"></script>
   <script src="storage.js"></script>
   <script src="srs.js"></script>
   <script src="app.js"></script>

@@ -4,7 +4,7 @@
 // アプリを更新したら、この番号を上げる(v1 → v2 ...)。
 // 番号が変わると新しいキャッシュが作られ、古いキャッシュは削除される。
 // ---------------------------------------------------------------
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE_NAME = `anki-pwa-${CACHE_VERSION}`;
 
 // オフラインで必要なファイルの一覧(すべて、この sw.js からの相対パス)。
@@ -14,6 +14,7 @@ const PRECACHE = [
   "index.html",
   "app.js",
   "storage.js",
+  "backup.js",
   "srs.js",
   "manifest.webmanifest",
   "icons/icon-192.png",

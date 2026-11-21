@@ -40,6 +40,8 @@ const els = {
   counts: { new: $("count-new"), learning: $("count-learning"), review: $("count-review") },
   countBoxes: [...document.querySelectorAll(".count")],
   done: $("done"), doneNote: $("done-note"),
+  backupLast: $("backup-last"), backupExport: $("backup-export"), backupImport: $("backup-import"),
+  backupFile: $("backup-file"), backupResult: $("backup-result"),
   debug: $("debug"), debugClock: $("debug-clock"), debugViewport: $("debug-viewport"),
 };
 
@@ -253,6 +255,7 @@ function showLibrary() {
   state.current = null;
   els.viewer.hidden = true;
   els.library.hidden = false;
+  renderBackupStatus();
 }
 
 async function updatePersistStatus() {
@@ -310,6 +313,161 @@ async function removeDeck(d) {
     console.error(e);
     setStatus("削除できませんでした: " + describeError(e), true);
   }
+}
+
+// ---------------------------------------------------------------
+// バックアップ(計算は backup.js、保存は storage.js)
+// ---------------------------------------------------------------
+// 「最後のバックアップ」の日時。表示のためだけの目印なので localStorage に置く
+// (消えても学習記録には影響せず、「未実施」と表示されるだけ)。
+const LAST_BACKUP_KEY = "anki-pwa-last-backup-ms";
+
+function getLastBackup() {
+  try {
+    const v = Number(localStorage.getItem(LAST_BACKUP_KEY));
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch { return null; }
+}
+
+function setLastBackup(ms) {
+  try { localStorage.setItem(LAST_BACKUP_KEY, String(ms)); } catch { /* 表示が「未実施」のままになるだけ */ }
+}
+
+function renderBackupStatus() {
+  const ts = getLastBackup();
+  if (ts == null) {
+    els.backupLast.textContent = "最後のバックアップ: 未実施";
+    return;
+  }
+  const days = Math.max(0, Math.floor((Date.now() - ts) / 86400000));
+  els.backupLast.textContent = "最後のバックアップ: " + (days === 0 ? "今日" : `${days}日前`);
+}
+
+function setBackupBusy(busy) {
+  els.backupExport.disabled = busy;
+  els.backupImport.disabled = busy;
+}
+
+// .apkg の中の全カード ID(読み込むバックアップがこのデッキに合うか調べるために使う)
+async function readCardIds(blob) {
+  const zip = await JSZip.loadAsync(blob);
+  const entry = zip.file("collection.anki21");
+  if (!entry) throw new Error("collection.anki21 が見つかりません(この形式は未対応です)");
+  const SQL = await initSqlJs({ locateFile: (f) => "lib/" + f });
+  const db = new SQL.Database(await entry.async("uint8array"));
+  try {
+    const rows = db.exec("SELECT id FROM cards")[0]?.values ?? [];
+    return new Set(rows.map((r) => r[0]));
+  } finally {
+    db.close();
+  }
+}
+
+// 共有シート(「ファイルに保存」など)に渡す。使えなければダウンロード。
+// 戻り値: 渡せた(または保存を始めた)なら true、ユーザーが共有をやめたなら false
+async function shareOrDownload(file) {
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: file.name });
+      return true;
+    } catch (e) {
+      if (e?.name === "AbortError") return false; // 自分でやめた
+      console.warn("共有できなかったのでダウンロードに切り替えます", e);
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file.name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return true;
+}
+
+function dateStamp(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+}
+
+async function exportBackup() {
+  els.backupResult.textContent = "";
+  setBackupBusy(true);
+  try {
+    const now = Date.now();
+    const backup = Backup.build({ decks: await DeckStore.exportAll(), now });
+    const c = Backup.counts(backup);
+    if (c.decks === 0) {
+      setStatus("バックアップするデッキがありません", true);
+      return;
+    }
+    const summary = `${c.decks} デッキ・カード ${c.cards.toLocaleString("ja-JP")} 枚・履歴 ${c.logs.toLocaleString("ja-JP")} 件`;
+    setStatus(`書き出し中: ${summary}`);
+    const file = new File([JSON.stringify(backup)], `anki-pwa-backup-${dateStamp(now)}.json`, { type: "application/json" });
+    if (await shareOrDownload(file)) {
+      setLastBackup(now);
+      renderBackupStatus();
+      setStatus(`書き出しました: ${summary}`);
+    } else {
+      setStatus("書き出しをやめました");
+    }
+  } catch (e) {
+    console.error(e);
+    setStatus("書き出せませんでした: " + describeError(e), true);
+  } finally {
+    setBackupBusy(false);
+  }
+}
+
+async function importBackup(file) {
+  els.backupResult.textContent = "";
+  if (file.size > 100 * 1024 * 1024) throw new Error("ファイルが大きすぎます");
+
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(await file.text());
+  } catch {
+    throw new Error("バックアップファイル(JSON)として読めません");
+  }
+  const v = Backup.validate(parsedJson);
+  if (!v.ok) throw new Error(v.error);
+  const backup = v.backup;
+
+  // バックアップに含まれ、端末にもあるデッキについて、実在するカード ID を .apkg から調べる
+  const local = await DeckStore.listDecks();
+  const localIds = new Set(local.map((d) => d.id));
+  const targets = backup.decks.filter((d) => localIds.has(d.id));
+  const cardIdsByDeck = new Map();
+  for (const [i, d] of targets.entries()) {
+    setStatus(`デッキを確認中 (${i + 1}/${targets.length})...`);
+    const blob = await DeckStore.getDeckBlob(d.id);
+    if (!blob) throw new Error(`デッキ「${d.name}」の保存データが見つかりません`);
+    cardIdsByDeck.set(d.id, await readCardIds(blob));
+  }
+
+  // まず何も書かずに結果の見込みを出し、確認してから書き込む
+  const preview = await DeckStore.importMerge(backup, cardIdsByDeck, { dryRun: true });
+  const previewText = Backup.describe(preview, { done: false });
+  if (!preview.hasChanges) {
+    els.backupResult.textContent = "反映するものはありませんでした。\n" + previewText;
+    setStatus("読み込みを終了しました(変更なし)");
+    return;
+  }
+  const when = new Date(backup.exportedAt).toLocaleString("ja-JP");
+  const ok = confirm(`バックアップ(${when} 書き出し)を読み込みます。\n\n${previewText}\n\nこの内容で読み込みますか？`);
+  if (!ok) {
+    setStatus("読み込みをキャンセルしました");
+    return;
+  }
+
+  setStatus("読み込み中...");
+  const result = await DeckStore.importMerge(backup, cardIdsByDeck, { dryRun: false });
+  els.backupResult.textContent = Backup.describe(result, { done: true });
+  await renderLibrary();
+  const warn = result.totals.orphanCards > 0 || result.totals.missingDecks > 0;
+  setStatus(warn ? "読み込みました(スキップがあります。下の内容を確認してください)" : "読み込みました", warn);
 }
 
 // ---------------------------------------------------------------
@@ -644,6 +802,23 @@ els.file.addEventListener("change", async () => {
   }
 });
 
+els.backupExport.addEventListener("click", exportBackup);
+els.backupImport.addEventListener("click", () => els.backupFile.click());
+els.backupFile.addEventListener("change", async () => {
+  const file = els.backupFile.files[0];
+  if (!file) return;
+  setBackupBusy(true);
+  try {
+    await importBackup(file);
+  } catch (e) {
+    console.error(e);
+    setStatus("読み込めませんでした: " + describeError(e), true);
+  } finally {
+    els.backupFile.value = ""; // 同じファイルをもう一度選んでも change が発火するように
+    setBackupBusy(false);
+  }
+});
+
 els.backToLibrary.addEventListener("click", async () => {
   showLibrary();
   setStatus("");
@@ -753,6 +928,7 @@ function initServiceWorker() {
   updateDebugViewport();
   initServiceWorker();
   showVersion();
+  renderBackupStatus();
   try {
     await renderLibrary();
     await updatePersistStatus();

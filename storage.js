@@ -15,6 +15,9 @@
 // 一覧取得で大きい Blob を読まないよう、decks と deckFiles は分けてある。
 //
 // version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
+//
+// バックアップ(exportAll / importMerge)は backup.js(グローバル `Backup`)と組で使う。
+// ストアの構造は変えない。
 // ---------------------------------------------------------------
 const DeckStore = (() => {
   const DB_NAME = "anki-pwa";
@@ -206,9 +209,64 @@ const DeckStore = (() => {
     await run(ALL_STORES, "readwrite", (s) => deleteAllOf(s, id));
   }
 
+  // -------------------------------------------------------------
+  // バックアップ(計算は backup.js。ここは読み書きだけ)
+  // -------------------------------------------------------------
+
+  // 書き出し用: 全デッキの学習記録・回答履歴・新規上限。Backup.build に渡す形で返す(Blob は読まない)。
+  async function exportAll() {
+    return run(["decks", "cardRecords", "reviewLogs"], "readonly", async (s) => {
+      const [decks, records, logs] = await Promise.all([
+        reqToPromise(s.decks.getAll()),
+        reqToPromise(s.cardRecords.getAll()),
+        reqToPromise(s.reviewLogs.getAll()),
+      ]);
+      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, records: [], logs: [] }]));
+      for (const r of records) byId.get(r.deckId)?.records.push(r);
+      for (const l of logs) byId.get(l.deckId)?.logs.push(l);
+      return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  }
+
+  // バックアップを端末に統合する。dryRun: true なら何も書かず、結果の見込みだけ返す。
+  //  backup: Backup.validate 済み / cardIdsByDeck: Map(deckId → そのデッキに実在するカード ID の Set)
+  // 端末の現在の状態は同じトランザクション内で読み直して統合を計算するので、
+  // 確認画面を出している間に端末側が変わっていても、新しい記録を上書きしない。
+  // 途中で失敗したら全体がロールバックされる。
+  async function importMerge(backup, cardIdsByDeck, { dryRun }) {
+    const mode = dryRun ? "readonly" : "readwrite";
+    return run(["decks", "cardRecords", "reviewLogs"], mode, async (s) => {
+      const decks = await reqToPromise(s.decks.getAll());
+      const inBackup = new Set(backup.decks.map((d) => d.id));
+      const local = [];
+      for (const d of decks) {
+        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, records: [], logs: [], cardIds: null };
+        if (inBackup.has(d.id)) {
+          const only = IDBKeyRange.only(d.id);
+          entry.records = await reqToPromise(s.cardRecords.index("byDeck").getAll(only));
+          entry.logs = await reqToPromise(s.reviewLogs.index("byDeck").getAll(only));
+          entry.cardIds = cardIdsByDeck.get(d.id) ?? null;
+        }
+        local.push(entry);
+      }
+
+      const p = Backup.plan(backup, local);
+      if (!dryRun) {
+        for (const r of p.writes.records) s.cardRecords.put(r);
+        for (const l of p.writes.logs) s.reviewLogs.add(l); // id は自動採番
+        for (const { deckId, value } of p.writes.newPerDay) {
+          const d = decks.find((x) => x.id === deckId);
+          if (d) s.decks.put({ ...d, newPerDay: value });
+        }
+      }
+      return p;
+    });
+  }
+
   return {
     requestPersistence, listDecks, findDuplicates, saveDeck,
     getDeckBlob, touchDeck, deleteDeck,
     getNewPerDay, setNewPerDay, getCardRecords, saveReview, countNewSince,
+    exportAll, importMerge,
   };
 })();
