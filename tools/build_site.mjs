@@ -17,7 +17,7 @@ const devDir = path.resolve(args.dev);
 const outDir = path.resolve(args.out);
 
 // 公開しない名前(どの階層でも)と拡張子
-const EXCLUDE_NAMES = new Set([".git", ".github", "tools", "data", "node_modules", "icons-dev", "CLAUDE.md", "inspect_apkg.py"]);
+const EXCLUDE_NAMES = new Set([".git", ".github", "tools", "data", "node_modules", "icons-dev", "CLAUDE.md", "inspect_apkg.py", "docs"]);
 const EXCLUDE_EXT = [".apkg", ".colpkg", ".anki2", ".mp3", ".pdf", ".epub"];
 const filter = (src) => {
   const base = path.basename(src);

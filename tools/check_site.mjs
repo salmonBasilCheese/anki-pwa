@@ -42,7 +42,7 @@ try {
 
   // 公開してはいけないものが入っていない
   const all = walk(out);
-  const bad = all.filter((p) => /(^|\/)(\.git|\.github|tools|data|icons-dev|CLAUDE\.md|inspect_apkg\.py)(\/|$)/.test(p) || /\.(apkg|colpkg|anki2|mp3|pdf|epub)$/i.test(p));
+  const bad = all.filter((p) => /(^|\/)(\.git|\.github|tools|data|icons-dev|docs|CLAUDE\.md|inspect_apkg\.py)(\/|$)/.test(p) || /\.(apkg|colpkg|anki2|mp3|pdf|epub)$/i.test(p));
   check(bad.length === 0, `no private/dev files in the site ${bad.join(",")}`);
 } catch (e) {
   failed++;
