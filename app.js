@@ -56,6 +56,7 @@ const state = {
   cardById: new Map(),
   session: null,          // srs.js のセッション(出題状態)
   showIpa: true,          // 学習中のデッキで IPA を表示するか(デッキごとの設定)
+  learnedOtherDecks: 0,   // 学習中以外のデッキで、すでに学習したカードの数
   customLayout: false,    // 表示する項目をデッキごとに選んでいるか
   layout: null,           // 学習中のデッキの表示項目 { front: [フィールド名], back: [...] }
   current: null,          // 今出しているカード { cardId, kind, record, card }
@@ -663,7 +664,10 @@ async function startStudy(parsed) {
   state.mediaByName = parsed.mediaByName;
   state.cards = parsed.cards;
   state.cardById = new Map(parsed.cards.map((c) => [c.id, c]));
-  els.deckInfo.textContent = parsed.deckLabel;
+  // 学習画面の上部に出す「学習した単語」は全デッキの合計。いま学習中のデッキ以外の分をここで数えておく
+  state.learnedOtherDecks = (await DeckStore.listDecks())
+    .filter((d) => d.id !== state.deckId)
+    .reduce((sum, d) => sum + d.learnedCount, 0);
 
   await buildSession();
   // 表示する項目を選んでいないデッキは、初期設定のフィールドが全部あることが必要
@@ -706,6 +710,9 @@ function updateCounts(kind) {
   els.counts.new.textContent = c.new;
   els.counts.learning.textContent = c.learning;
   els.counts.review.textContent = c.review;
+  // 学習した単語 = 一度でも答えたカードの数(全デッキの合計)。答えるたびに増え、減らない
+  const learned = state.learnedOtherDecks + state.session.records.size;
+  els.deckInfo.textContent = `学習した単語 ${learned.toLocaleString("ja-JP")}語`;
   for (const box of els.countBoxes) box.classList.toggle("current", box.dataset.kind === kind);
 }
 
