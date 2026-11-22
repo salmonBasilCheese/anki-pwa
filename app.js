@@ -57,8 +57,7 @@ const state = {
   session: null,          // srs.js のセッション(出題状態)
   showIpa: true,          // 学習中のデッキで IPA を表示するか(デッキごとの設定)
   learnedOtherDecks: 0,   // 学習中以外のデッキで、すでに学習したカードの数
-  customLayout: false,    // 表示する項目をデッキごとに選んでいるか
-  layout: null,           // 学習中のデッキの表示項目 { front: [フィールド名], back: [...] }
+  layout: null,           // 表裏に出すフィールド名 { front: [...], back: [...] }(初期設定)
   current: null,          // 今出しているカード { cardId, kind, record, card }
   revealed: false,
   busy: false,            // 回答の保存中
@@ -155,7 +154,7 @@ async function readCollection(db, zip) {
   });
 
   // フィールド名の一覧と、初期設定(DECK_PROFILE)に足りないフィールド。
-  // 足りなくても取り込める(設定の「表示する項目」で選べば開ける)。開くときに startStudy が確かめる。
+  // 取り込むとき(importFile)と開くとき(startStudy)に、足りなければ止める。
   const firstCardFields = Object.keys(cards[0].fields);
   const missingProfile = Object.values(DECK_PROFILE.fields).filter((n) => !firstCardFields.includes(n));
 
@@ -249,99 +248,8 @@ async function renderLibrary() {
 function buildSettingsPanel(d) {
   const panel = document.createElement("div");
   panel.className = "deck-settings";
-  panel.append(buildLimitInput(d), buildIpaToggle(d), buildFontScaleSelect(d), buildLayoutEditor(d));
+  panel.append(buildLimitInput(d), buildIpaToggle(d), buildFontScaleSelect(d));
   return panel;
-}
-
-// 表示する項目の選択(デッキごと)。フィールド名は .apkg を開いて読む(押したときに一度だけ)。
-// 並びは Anki のフィールドの順。未設定は初期設定(DECK_PROFILE)。
-function buildLayoutEditor(d) {
-  const wrap = document.createElement("div");
-  wrap.className = "deck-layout";
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.textContent = "表示する項目を選ぶ";
-  const body = document.createElement("div");
-  body.hidden = true;
-  wrap.append(toggle, body);
-
-  let loaded = false;
-  toggle.addEventListener("click", async () => {
-    body.hidden = !body.hidden;
-    if (body.hidden || loaded) return;
-    try {
-      const blob = await DeckStore.getDeckBlob(d.id);
-      if (!blob) throw new Error("保存データが見つかりません");
-      const { fieldNames } = await parseApkg(blob);
-      setStatus("");
-      loaded = true;
-      await renderLayoutBody(body, d, fieldNames);
-    } catch (e) {
-      console.error(e);
-      body.hidden = true;
-      setStatus("項目を読み込めませんでした: " + describeError(e), true);
-    }
-  });
-  return wrap;
-}
-
-async function renderLayoutBody(body, d, fieldNames) {
-  body.replaceChildren();
-  const saved = await DeckStore.getLayout(d.id);
-  const cur = resolveLayout(saved);
-  const boxes = { front: new Map(), back: new Map() };
-
-  const save = async (changed) => {
-    const pick = (side) => fieldNames.filter((n) => boxes[side].get(n).checked);
-    const layout = { front: pick("front"), back: pick("back") };
-    if (layout.front.length === 0) {
-      changed.checked = true; // 表面が空にならないよう元に戻す
-      setStatus("表面には 1 つ以上の項目が要ります", true);
-      return;
-    }
-    try {
-      await DeckStore.setLayout(d.id, layout);
-      setStatus("");
-    } catch (e) {
-      console.error(e);
-      changed.checked = !changed.checked;
-      setStatus("設定を保存できませんでした: " + describeError(e), true);
-    }
-  };
-
-  for (const [side, title] of [["front", "表面に出す項目"], ["back", "裏面に出す項目"]]) {
-    const set = document.createElement("fieldset");
-    set.className = "deck-fieldset";
-    const legend = document.createElement("legend");
-    legend.textContent = title;
-    set.append(legend);
-    for (const name of fieldNames) {
-      const label = document.createElement("label");
-      label.className = "deck-toggle";
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = cur[side].includes(name);
-      box.addEventListener("change", () => save(box));
-      boxes[side].set(name, box);
-      label.append(box, name); // フィールド名はデッキ由来なので文字列として入れる
-      set.append(label);
-    }
-    body.append(set);
-  }
-
-  const reset = document.createElement("button");
-  reset.type = "button";
-  reset.textContent = "初期設定に戻す";
-  reset.addEventListener("click", async () => {
-    try {
-      await DeckStore.setLayout(d.id, null);
-      await renderLayoutBody(body, d, fieldNames);
-    } catch (e) {
-      console.error(e);
-      setStatus("設定を保存できませんでした: " + describeError(e), true);
-    }
-  });
-  body.append(reset);
 }
 
 // カードの文字サイズ(デッキごと。未設定は標準)
@@ -467,6 +375,9 @@ async function openSaved(id) {
 async function importFile(file) {
   setStatus("展開中...");
   const parsed = await parseApkg(file); // 壊れたファイルはここで失敗し、何も保存されない
+  if (parsed.missingProfile.length) { // 開けないデッキは保存しない
+    throw new Error("このデッキには初期設定の項目がありません(" + parsed.missingProfile.join(", ") + ")");
+  }
 
   const dups = await DeckStore.findDuplicates(parsed.deck);
   if (dups.length > 0) {
@@ -670,9 +581,9 @@ async function startStudy(parsed) {
     .reduce((sum, d) => sum + d.learnedCount, 0);
 
   await buildSession();
-  // 表示する項目を選んでいないデッキは、初期設定のフィールドが全部あることが必要
-  if (!state.customLayout && parsed.missingProfile.length) {
-    throw new Error("このデッキには初期設定の項目がありません(" + parsed.missingProfile.join(", ") + ")。デッキの「設定」の「表示する項目」で選ぶと開けます。");
+  // 初期設定のフィールドが全部あることが必要
+  if (parsed.missingProfile.length) {
+    throw new Error("このデッキには初期設定の項目がありません(" + parsed.missingProfile.join(", ") + ")");
   }
   els.library.hidden = true;
   els.viewer.hidden = false;
@@ -684,17 +595,15 @@ async function startStudy(parsed) {
 async function buildSession() {
   const id = state.deckId;
   const nowMs = Srs.now();
-  const [records, limit, showIpa, fontScale, layout, newToday] = await Promise.all([
+  const [records, limit, showIpa, fontScale, newToday] = await Promise.all([
     DeckStore.getCardRecords(id),
     DeckStore.getNewPerDay(id),
     DeckStore.getShowIpa(id),
     DeckStore.getFontScale(id),
-    DeckStore.getLayout(id),
     DeckStore.countNewSince(id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
   ]);
   state.showIpa = showIpa;
-  state.customLayout = layout != null;
-  state.layout = resolveLayout(layout);
+  state.layout = resolveLayout();
   els.card.style.setProperty("--card-scale", String(fontScale));
   state.session = Srs.createSession({
     cards: state.cards,
@@ -807,9 +716,8 @@ function roleOfField(name) {
   return Object.keys(DECK_PROFILE.fields).find((k) => DECK_PROFILE.fields[k] === name) ?? null;
 }
 
-// 保存された設定(無ければ初期設定)から、表裏に出すフィールド名を決める
-function resolveLayout(saved) {
-  if (saved) return saved;
+// 表裏に出すフィールド名(初期設定)。項目の出し分けは IPA の表示・非表示だけ
+function resolveLayout() {
   const F = DECK_PROFILE.fields;
   return { front: DECK_PROFILE.front.map((k) => F[k]), back: DECK_PROFILE.back.map((k) => F[k]) };
 }
