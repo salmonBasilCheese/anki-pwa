@@ -205,7 +205,7 @@ const DeckStore = (() => {
   // カードの文字の倍率(未設定・不正な値は 1)
   async function getFontScale(id) {
     const d = await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)));
-    return Backup.FONT_SCALES.includes(d?.fontScale) ? d.fontScale : 1;
+    return Backup.normalizeFontScale(d?.fontScale) ?? 1; // 古い版で選んだ特大(1.4)は「大」になる
   }
 
   async function setFontScale(id, value) {
@@ -258,19 +258,6 @@ const DeckStore = (() => {
       )
     );
     return logs.filter((l) => l.state === 0).length; // state 0 = 回答前が New
-  }
-
-  // 全デッキの回答時刻(ms)の一覧。連続学習日数の計算に使う(履歴の中身は読まず、キーだけ読む)。
-  async function getReviewTimes() {
-    return run(["reviewLogs"], "readonly", (s) => new Promise((resolve, reject) => {
-      const times = [];
-      const req = s.reviewLogs.index("byDeckTime").openKeyCursor();
-      req.onsuccess = () => {
-        const c = req.result;
-        if (c) { times.push(c.key[1]); c.continue(); } else resolve(times);
-      };
-      req.onerror = () => reject(req.error);
-    }));
   }
 
   // デッキと、その進み具合・学習記録を全て削除する(1トランザクション)
@@ -341,7 +328,7 @@ const DeckStore = (() => {
   return {
     requestPersistence, listDecks, findDuplicates, saveDeck,
     getDeckBlob, touchDeck, deleteDeck,
-    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getLayout, setLayout, getCardRecords, saveReview, countNewSince, getReviewTimes,
+    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getLayout, setLayout, getCardRecords, saveReview, countNewSince,
     exportAll, importMerge,
     channel: CHANNEL,
   };

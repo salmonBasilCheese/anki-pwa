@@ -7,7 +7,7 @@
 //
 // バックアップファイル(JSON) schemaVersion 1
 //   { app: "anki-pwa-backup", schemaVersion: 1, exportedAt: ms,
-//     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null, fontScale: FONT_SCALES のどれか|null,
+//     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null, fontScale: FONT_SCALES のどれか|null(古い版の 1.4 は 1.2 に丸める),
 //                layout: { front: [フィールド名], back: [フィールド名] }|null(showIpa・fontScale・layout は省略可。古いファイルには無い),
 //                cardRecords: [ srs.js の record(形は srs.js の先頭コメント。deckId は持たない) ],
 //                reviewLogs:  [ 回答履歴(deckId・自動採番の id は持たない) ] } ] }
@@ -22,9 +22,14 @@ const Backup = (() => {
   // MIGRATIONS[n] は、schemaVersion n のデータを n+1 の形に変換して返す
   const MIGRATIONS = {};
   // カードの文字の倍率の選択肢(app.js の設定画面と同じ。標準は 1)
-  const FONT_SCALES = [0.85, 1, 1.2, 1.4];
+  const FONT_SCALES = [0.85, 1, 1.2];
+  // 選択肢に無い数(古い版にあった 1.4 など)は、いちばん近い選択肢に丸める。数でない・範囲外は null
+  const normalizeFontScale = (v) =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0.5 && v <= 3
+      ? FONT_SCALES.reduce((best, x) => (Math.abs(x - v) < Math.abs(best - v) ? x : best))
+      : null;
 
-  const FONT_SCALE_LABELS = { 0.85: "小", 1: "標準", 1.2: "大", 1.4: "特大" };
+  const FONT_SCALE_LABELS = { 0.85: "小", 1: "中", 1.2: "大" };
 
   // 表示する項目の設定(デッキごと)。{ front: [フィールド名...], back: [...] }。表面には 1 つ以上要る。
   // 決まった形だけを取り出して返す。不正なら undefined(null は「設定なし」として null のまま通す)
@@ -100,7 +105,7 @@ const Backup = (() => {
         name: d.name,
         newPerDay: d.newPerDay ?? null,
         showIpa: typeof d.showIpa === "boolean" ? d.showIpa : null,
-        fontScale: FONT_SCALES.includes(d.fontScale) ? d.fontScale : null,
+        fontScale: normalizeFontScale(d.fontScale),
         layout: cleanLayout(d.layout) ?? null,
         cardRecords: d.records.map(pickRecord),
         reviewLogs: d.logs.map(pickLog),
@@ -151,7 +156,7 @@ const Backup = (() => {
       if (d.showIpa != null && typeof d.showIpa !== "boolean") {
         return { ok: false, error: `${at} の IPA 表示の設定が正しくありません` };
       }
-      if (d.fontScale != null && !FONT_SCALES.includes(d.fontScale)) {
+      if (d.fontScale != null && normalizeFontScale(d.fontScale) === null) {
         return { ok: false, error: `${at} の文字サイズの設定が正しくありません` };
       }
       if (cleanLayout(d.layout) === undefined) {
@@ -172,7 +177,7 @@ const Backup = (() => {
         if (!c) return { ok: false, error: `${at}.reviewLogs[${j}] の形式が正しくありません` };
         reviewLogs.push(c);
       }
-      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: cleanLayout(d.layout), cardRecords, reviewLogs });
+      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: normalizeFontScale(d.fontScale), layout: cleanLayout(d.layout), cardRecords, reviewLogs });
     }
 
     return {
@@ -323,7 +328,7 @@ const Backup = (() => {
     return lines.join("\n");
   }
 
-  return { SCHEMA_VERSION, cleanLayout, FONT_SCALES, FONT_SCALE_LABELS, build, counts, validate, plan, describe, isNewer };
+  return { SCHEMA_VERSION, cleanLayout, normalizeFontScale, FONT_SCALES, FONT_SCALE_LABELS, build, counts, validate, plan, describe, isNewer };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = Backup;

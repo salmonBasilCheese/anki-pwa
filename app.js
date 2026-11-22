@@ -171,22 +171,8 @@ function describeError(e) {
   return e?.message ?? String(e);
 }
 
-// 連続学習日数(全デッキ合計)。デッキが無いときは出さない
-async function renderStreak(hasDecks) {
-  const box = $("streak");
-  if (!hasDecks) { box.hidden = true; return; }
-  const st = Srs.streak(await DeckStore.getReviewTimes(), Srs.now());
-  box.textContent = st.days === 0
-    ? "今日学習して、連続記録を始めましょう"
-    : st.studiedToday
-      ? `連続学習 ${st.days}日（今日も学習済み）`
-      : `連続学習 ${st.days}日（今日学習すると続きます）`;
-  box.hidden = false;
-}
-
 async function renderLibrary() {
   const decks = await DeckStore.listDecks();
-  await renderStreak(decks.length > 0);
 
   // デッキごとの今日の残り枚数(新規 + 学習中 + 復習)
   const nowMs = Srs.now();
@@ -369,7 +355,7 @@ function buildFontScaleSelect(d) {
     opt.textContent = Backup.FONT_SCALE_LABELS[v];
     select.append(opt);
   }
-  let saved = Backup.FONT_SCALES.includes(d.fontScale) ? d.fontScale : 1;
+  let saved = Backup.normalizeFontScale(d.fontScale) ?? 1;
   select.value = String(saved);
   select.addEventListener("change", async () => {
     const want = Number(select.value);
