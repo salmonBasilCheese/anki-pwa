@@ -7,7 +7,8 @@
 //
 // バックアップファイル(JSON) schemaVersion 1
 //   { app: "anki-pwa-backup", schemaVersion: 1, exportedAt: ms,
-//     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null, fontScale: FONT_SCALES のどれか|null(どちらも省略可。古いファイルには無い),
+//     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null, fontScale: FONT_SCALES のどれか|null,
+//                layout: { front: [フィールド名], back: [フィールド名] }|null(showIpa・fontScale・layout は省略可。古いファイルには無い),
 //                cardRecords: [ srs.js の record(形は srs.js の先頭コメント。deckId は持たない) ],
 //                reviewLogs:  [ 回答履歴(deckId・自動採番の id は持たない) ] } ] }
 // 含めないもの: .apkg 本体・教材の中身(カードの内容)。
@@ -24,6 +25,21 @@ const Backup = (() => {
   const FONT_SCALES = [0.85, 1, 1.2, 1.4];
 
   const FONT_SCALE_LABELS = { 0.85: "小", 1: "標準", 1.2: "大", 1.4: "特大" };
+
+  // 表示する項目の設定(デッキごと)。{ front: [フィールド名...], back: [...] }。表面には 1 つ以上要る。
+  // 決まった形だけを取り出して返す。不正なら undefined(null は「設定なし」として null のまま通す)
+  function cleanLayout(x) {
+    if (x == null) return null;
+    if (!isObj(x)) return undefined;
+    const side = (a, min) => {
+      if (!Array.isArray(a) || a.length < min || a.length > 30) return undefined;
+      if (!a.every((n) => typeof n === "string" && n.length >= 1 && n.length <= 200)) return undefined;
+      return [...new Set(a)];
+    };
+    const front = side(x.front, 1);
+    const back = side(x.back, 0);
+    return front && back ? { front, back } : undefined;
+  }
 
   const isNum = (x) => typeof x === "number" && Number.isFinite(x);
   const isInt = (x) => Number.isSafeInteger(x);
@@ -85,6 +101,7 @@ const Backup = (() => {
         newPerDay: d.newPerDay ?? null,
         showIpa: typeof d.showIpa === "boolean" ? d.showIpa : null,
         fontScale: FONT_SCALES.includes(d.fontScale) ? d.fontScale : null,
+        layout: cleanLayout(d.layout) ?? null,
         cardRecords: d.records.map(pickRecord),
         reviewLogs: d.logs.map(pickLog),
       })),
@@ -137,6 +154,9 @@ const Backup = (() => {
       if (d.fontScale != null && !FONT_SCALES.includes(d.fontScale)) {
         return { ok: false, error: `${at} の文字サイズの設定が正しくありません` };
       }
+      if (cleanLayout(d.layout) === undefined) {
+        return { ok: false, error: `${at} の表示項目の設定が正しくありません` };
+      }
       if (!Array.isArray(d.cardRecords) || !Array.isArray(d.reviewLogs)) {
         return { ok: false, error: `${at} の学習記録が読み取れません` };
       }
@@ -152,7 +172,7 @@ const Backup = (() => {
         if (!c) return { ok: false, error: `${at}.reviewLogs[${j}] の形式が正しくありません` };
         reviewLogs.push(c);
       }
-      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, cardRecords, reviewLogs });
+      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: cleanLayout(d.layout), cardRecords, reviewLogs });
     }
 
     return {
@@ -168,13 +188,13 @@ const Backup = (() => {
   const isNewer = (incoming, existing) => !existing || lastReviewOf(incoming) > lastReviewOf(existing);
 
   // backup: validate 済み。
-  // local: 端末の全デッキ [{ id, name, newPerDay, showIpa, fontScale, records, logs, cardIds }]
+  // local: 端末の全デッキ [{ id, name, newPerDay, showIpa, fontScale, layout, records, logs, cardIds }]
   //   records/logs/cardIds が要るのは、バックアップにも含まれるデッキだけ。
   //   cardIds = そのデッキ(.apkg)に実在するカード ID の Set。
-  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, logs, newPerDay, showIpa, fontScale }, hasChanges }
+  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, logs, newPerDay, showIpa, fontScale, layout }, hasChanges }
   function plan(backup, local) {
     const localById = new Map(local.map((d) => [d.id, d]));
-    const writes = { records: [], logs: [], newPerDay: [], showIpa: [], fontScale: [] };
+    const writes = { records: [], logs: [], newPerDay: [], showIpa: [], fontScale: [], layout: [] };
     const decks = [];
     const totals = {
       recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
@@ -204,7 +224,7 @@ const Backup = (() => {
       const d = {
         id: bd.id, name: ld.name, status: "ok",
         recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
-        orphanCards: 0, orphanLogs: 0, newPerDayApplied: null, showIpaApplied: null, fontScaleApplied: null,
+        orphanCards: 0, orphanLogs: 0, newPerDayApplied: null, showIpaApplied: null, fontScaleApplied: null, layoutApplied: false,
       };
 
       // バックアップ内に同じカードが複数あれば、新しいほうだけを使う
@@ -252,6 +272,12 @@ const Backup = (() => {
         d.fontScaleApplied = bd.fontScale;
       }
 
+      // 表示する項目: 同じく、端末に設定が無いときだけ反映する
+      if (bd.layout && ld.layout == null) {
+        writes.layout.push({ deckId: bd.id, value: bd.layout });
+        d.layoutApplied = true;
+      }
+
       d.orphanCards = orphan.size;
       decks.push(d);
       totals.recordsApply += d.recordsApply;
@@ -263,7 +289,7 @@ const Backup = (() => {
     }
 
     const hasChanges =
-      writes.records.length > 0 || writes.logs.length > 0 || writes.newPerDay.length > 0 || writes.showIpa.length > 0 || writes.fontScale.length > 0;
+      writes.records.length > 0 || writes.logs.length > 0 || writes.newPerDay.length > 0 || writes.showIpa.length > 0 || writes.fontScale.length > 0 || writes.layout.length > 0;
     return { decks, totals, writes, hasChanges };
   }
 
@@ -287,6 +313,7 @@ const Backup = (() => {
       if (d.newPerDayApplied != null) lines.push(`  新規カード/日: ${d.newPerDayApplied} を反映${done ? "しました" : "します"}`);
       if (d.showIpaApplied != null) lines.push(`  IPA の表示: ${d.showIpaApplied ? "表示する" : "表示しない"} を反映${done ? "しました" : "します"}`);
       if (d.fontScaleApplied != null) lines.push(`  文字サイズ: ${FONT_SCALE_LABELS[d.fontScaleApplied]} を反映${done ? "しました" : "します"}`);
+      if (d.layoutApplied) lines.push(`  表示する項目の設定を反映${done ? "しました" : "します"}`);
       if (d.orphanCards > 0) {
         lines.push(`  ⚠ ${n(d.orphanCards)} 枚は該当カードなしでスキップ` +
           (d.orphanLogs ? `(履歴 ${n(d.orphanLogs)} 件を含む)` : "") +
@@ -296,7 +323,7 @@ const Backup = (() => {
     return lines.join("\n");
   }
 
-  return { SCHEMA_VERSION, FONT_SCALES, FONT_SCALE_LABELS, build, counts, validate, plan, describe, isNewer };
+  return { SCHEMA_VERSION, cleanLayout, FONT_SCALES, FONT_SCALE_LABELS, build, counts, validate, plan, describe, isNewer };
 })();
 
 if (typeof module !== "undefined" && module.exports) module.exports = Backup;

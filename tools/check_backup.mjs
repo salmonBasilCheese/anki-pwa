@@ -161,6 +161,31 @@ test("fontScale が選択肢に無い値のバックアップは拒否する。�
   for (const bad of [2, 0, "1.2", -1, 999]) { f.decks[0].fontScale = bad; assert.equal(Backup.validate(f).ok, false, `fontScale=${bad}`); }
 });
 
+test("表示する項目(layout)は往復で保たれ、端末に設定が無いときだけ反映する", () => {
+  const L = { front: ["Word"], back: ["Def", "Ex"] };
+  const mk = (v) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: null, layout: v, records: [], logs: [] }])).backup;
+  assert.deepEqual(mk(L).decks[0].layout, L);
+  assert.deepEqual(Backup.plan(mk(L), [localDeck()]).writes.layout, [{ deckId: "D1", value: L }]);
+  assert.equal(Backup.plan(mk(L), [localDeck({ layout: { front: ["A"], back: [] } })]).writes.layout.length, 0, "端末に設定があれば上書きしない");
+  assert.equal(Backup.plan(mk(null), [localDeck()]).writes.layout.length, 0, "バックアップに設定が無ければ何もしない");
+  assert.match(Backup.describe(Backup.plan(mk(L), [localDeck()]), { done: false }), /表示する項目の設定を反映します/);
+});
+
+test("layout の検査: 余計な項目は捨て、重複は除き、不正な形は拒否する", () => {
+  const f = () => JSON.parse(JSON.stringify(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: null, records: [], logs: [] }])));
+  const ok = f(); ok.decks[0].layout = { front: ["A", "A"], back: [], extra: 1 };
+  const r = Backup.validate(ok);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.backup.decks[0].layout, { front: ["A"], back: [] });
+  for (const bad of [{ front: [], back: [] }, { front: ["A"] }, { front: "A", back: [] }, { front: [1], back: [] },
+    { front: [""], back: [] }, { front: ["A"], back: [{}] }, [], "x", { front: Array(31).fill(0).map((_, i) => "f" + i), back: [] }]) {
+    const g = f(); g.decks[0].layout = bad;
+    assert.equal(Backup.validate(g).ok, false, JSON.stringify(bad));
+  }
+  const none = f(); delete none.decks[0].layout;
+  assert.equal(Backup.validate(none).ok, true, "layout の無い古い形式は読める");
+});
+
 test("新規上限(newPerDay)は端末に設定が無いときだけ反映する", () => {
   const mk = (n) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: n, records: [], logs: [] }])).backup;
   assert.equal(Backup.plan(mk(30), [localDeck({ newPerDay: null })]).writes.newPerDay.length, 1);

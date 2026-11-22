@@ -12,7 +12,8 @@
 //   reviewLogs   key: 自動採番            回答の履歴(いつ・どのボタン)。deckId, cardId, rating, review(ms) ...
 //
 // decks のレコードには、デッキごとの設定 newPerDay(新規の1日の上限)・showIpa(IPA を表示するか。
-// 無い・null は「表示する」)・fontScale(カードの文字の倍率。無い・null は 1)が入ることがある。
+// 無い・null は「表示する」)・fontScale(カードの文字の倍率。無い・null は 1)・
+// layout(表示する項目 { front: [フィールド名], back: [...] }。無い・null は初期設定)が入ることがある。
 // 一覧取得で大きい Blob を読まないよう、decks と deckFiles は分けてある。
 //
 // version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
@@ -157,6 +158,7 @@ const DeckStore = (() => {
         ...(existing?.newPerDay != null && { newPerDay: existing.newPerDay }),
         ...(existing?.showIpa != null && { showIpa: existing.showIpa }),
         ...(existing?.fontScale != null && { fontScale: existing.fontScale }),
+        ...(existing?.layout != null && { layout: existing.layout }),
       });
       s.deckFiles.put({ deckId: meta.id, blob });
     });
@@ -214,6 +216,25 @@ const DeckStore = (() => {
     });
   }
 
+  // 表示する項目(未設定・不正なら null = 初期設定)
+  async function getLayout(id) {
+    const d = await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)));
+    return Backup.cleanLayout(d?.layout) ?? null;
+  }
+
+  // value が null なら設定を消して初期設定に戻す
+  async function setLayout(id, value) {
+    const layout = value == null ? null : Backup.cleanLayout(value);
+    if (layout === undefined || (value != null && layout === null)) throw new Error("表示項目の設定が正しくありません");
+    await run(["decks"], "readwrite", async (s) => {
+      const d = await reqToPromise(s.decks.get(id));
+      if (!d) return;
+      const next = { ...d };
+      if (layout) next.layout = layout; else delete next.layout;
+      s.decks.put(next);
+    });
+  }
+
   // デッキの全カードの学習記録
   async function getCardRecords(deckId) {
     return run(["cardRecords"], "readonly", (s) =>
@@ -256,7 +277,7 @@ const DeckStore = (() => {
         reqToPromise(s.cardRecords.getAll()),
         reqToPromise(s.reviewLogs.getAll()),
       ]);
-      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, records: [], logs: [] }]));
+      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, records: [], logs: [] }]));
       for (const r of records) byId.get(r.deckId)?.records.push(r);
       for (const l of logs) byId.get(l.deckId)?.logs.push(l);
       return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -275,7 +296,7 @@ const DeckStore = (() => {
       const inBackup = new Set(backup.decks.map((d) => d.id));
       const local = [];
       for (const d of decks) {
-        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, records: [], logs: [], cardIds: null };
+        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, records: [], logs: [], cardIds: null };
         if (inBackup.has(d.id)) {
           const only = IDBKeyRange.only(d.id);
           entry.records = await reqToPromise(s.cardRecords.index("byDeck").getAll(only));
@@ -294,6 +315,7 @@ const DeckStore = (() => {
         for (const { deckId, value } of p.writes.newPerDay) merged.set(deckId, { ...merged.get(deckId), newPerDay: value });
         for (const { deckId, value } of p.writes.showIpa) merged.set(deckId, { ...merged.get(deckId), showIpa: value });
         for (const { deckId, value } of p.writes.fontScale) merged.set(deckId, { ...merged.get(deckId), fontScale: value });
+        for (const { deckId, value } of p.writes.layout) merged.set(deckId, { ...merged.get(deckId), layout: value });
         for (const [deckId, patch] of merged) {
           const d = decks.find((x) => x.id === deckId);
           if (d) s.decks.put({ ...d, ...patch });
@@ -306,7 +328,7 @@ const DeckStore = (() => {
   return {
     requestPersistence, listDecks, findDuplicates, saveDeck,
     getDeckBlob, touchDeck, deleteDeck,
-    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getCardRecords, saveReview, countNewSince,
+    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getLayout, setLayout, getCardRecords, saveReview, countNewSince,
     exportAll, importMerge,
     channel: CHANNEL,
   };
