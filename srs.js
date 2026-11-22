@@ -211,6 +211,30 @@ const Srs = (() => {
     return { new: newLeft, learning, review };
   }
 
+  // デッキ一覧に出す「今日の残り枚数」。セッションを作らずに、学習記録と未学習の枚数だけで数える。
+  function remaining({ records, unseenCount, newPerDay, newToday, nowMs }) {
+    const session = {
+      records: new Map(records.map((r) => [r.cardId, r])),
+      unseen: { length: unseenCount },
+      newPerDay, newToday, dayIdx: dayIndex(nowMs),
+    };
+    const c = counts(session, nowMs);
+    return c.new + c.learning + c.review;
+  }
+
+  // 連続学習日数。reviewTimes: 全デッキの回答時刻(ms)。1日の区切りは午前4時(dayIndex)。
+  // 今日まだ学習していなくても、昨日までの連続は続いているものとして数える(今日学習すれば続く)。
+  // 戻り値: { days: 連続日数, studiedToday: 今日すでに学習したか }
+  function streak(reviewTimes, nowMs) {
+    const days = new Set(reviewTimes.map(dayIndex));
+    const today = dayIndex(nowMs);
+    const studiedToday = days.has(today);
+    let d = studiedToday ? today : today - 1;
+    let n = 0;
+    while (days.has(d)) { n++; d--; }
+    return { days: n, studiedToday };
+  }
+
   // 回答結果をセッションに反映する(DB への保存に成功したあとで呼ぶ)
   function applyAnswer(session, record, log, nowMs) {
     rollDay(session, nowMs);
@@ -226,6 +250,6 @@ const Srs = (() => {
     now, setOffset, getOffset,
     dayIndex, dayStart, nextDayStart,
     labels, answer, formatInterval,
-    createSession, pickNext, nextLearningDue, counts, applyAnswer,
+    createSession, pickNext, nextLearningDue, counts, remaining, streak, applyAnswer,
   };
 })();

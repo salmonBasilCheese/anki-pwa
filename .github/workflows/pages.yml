@@ -38,6 +38,7 @@ jobs:
       - name: Run checks (dev)
         run: |
           node dev/tools/check_backup.mjs
+          node dev/tools/check_srs.mjs
           node dev/tools/check_pwa.mjs
           node dev/tools/check_site.mjs
       - name: Build site

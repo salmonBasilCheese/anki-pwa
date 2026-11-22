@@ -171,8 +171,38 @@ function describeError(e) {
   return e?.message ?? String(e);
 }
 
+// 連続学習日数(全デッキ合計)。デッキが無いときは出さない
+async function renderStreak(hasDecks) {
+  const box = $("streak");
+  if (!hasDecks) { box.hidden = true; return; }
+  const st = Srs.streak(await DeckStore.getReviewTimes(), Srs.now());
+  box.textContent = st.days === 0
+    ? "今日学習して、連続記録を始めましょう"
+    : st.studiedToday
+      ? `連続学習 ${st.days}日（今日も学習済み）`
+      : `連続学習 ${st.days}日（今日学習すると続きます）`;
+  box.hidden = false;
+}
+
 async function renderLibrary() {
   const decks = await DeckStore.listDecks();
+  await renderStreak(decks.length > 0);
+
+  // デッキごとの今日の残り枚数(新規 + 学習中 + 復習)
+  const nowMs = Srs.now();
+  const remainingById = new Map(await Promise.all(decks.map(async (d) => {
+    const [records, newToday] = await Promise.all([
+      DeckStore.getCardRecords(d.id),
+      DeckStore.countNewSince(d.id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
+    ]);
+    const left = Srs.remaining({
+      records,
+      unseenCount: Math.max(0, d.cardCount - d.learnedCount),
+      newPerDay: d.newPerDay ?? SRS_CONFIG.defaultNewPerDay,
+      newToday, nowMs,
+    });
+    return [d.id, left];
+  })));
   els.deckList.replaceChildren();
 
   if (decks.length === 0) {
@@ -194,7 +224,8 @@ async function renderLibrary() {
 
     const meta = document.createElement("div");
     meta.className = "deck-meta";
-    meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚`;
+    const left = remainingById.get(d.id);
+    meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚 ・ ` + (left > 0 ? `今日の残り ${left}枚` : "今日の分は完了");
 
     li.append(name, meta);
 
