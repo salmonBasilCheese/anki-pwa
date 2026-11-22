@@ -231,8 +231,37 @@ async function renderLibrary() {
 function buildSettingsPanel(d) {
   const panel = document.createElement("div");
   panel.className = "deck-settings";
-  panel.append(buildLimitInput(d), buildIpaToggle(d));
+  panel.append(buildLimitInput(d), buildIpaToggle(d), buildFontScaleSelect(d));
   return panel;
+}
+
+// カードの文字サイズ(デッキごと。未設定は標準)
+function buildFontScaleSelect(d) {
+  const label = document.createElement("label");
+  label.className = "deck-limit";
+  label.append("文字サイズ");
+  const select = document.createElement("select");
+  for (const v of Backup.FONT_SCALES) {
+    const opt = document.createElement("option");
+    opt.value = String(v);
+    opt.textContent = Backup.FONT_SCALE_LABELS[v];
+    select.append(opt);
+  }
+  let saved = Backup.FONT_SCALES.includes(d.fontScale) ? d.fontScale : 1;
+  select.value = String(saved);
+  select.addEventListener("change", async () => {
+    const want = Number(select.value);
+    try {
+      await DeckStore.setFontScale(d.id, want);
+      saved = want;
+    } catch (e) {
+      console.error(e);
+      select.value = String(saved);
+      setStatus("設定を保存できませんでした: " + describeError(e), true);
+    }
+  });
+  label.append(select);
+  return label;
 }
 
 // IPA を表示するか(デッキごと。未設定は表示)
@@ -538,13 +567,15 @@ async function startStudy(parsed) {
 async function buildSession() {
   const id = state.deckId;
   const nowMs = Srs.now();
-  const [records, limit, showIpa, newToday] = await Promise.all([
+  const [records, limit, showIpa, fontScale, newToday] = await Promise.all([
     DeckStore.getCardRecords(id),
     DeckStore.getNewPerDay(id),
     DeckStore.getShowIpa(id),
+    DeckStore.getFontScale(id),
     DeckStore.countNewSince(id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
   ]);
   state.showIpa = showIpa;
+  els.card.style.setProperty("--card-scale", String(fontScale));
   state.session = Srs.createSession({
     cards: state.cards,
     records: records.filter((r) => state.cardById.has(r.cardId)), // デッキに無いカードの記録は無視

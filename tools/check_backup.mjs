@@ -145,6 +145,22 @@ test("showIpa の無い古い形式のバックアップも読める。真偽値
   assert.equal(Backup.validate(old).ok, false);
 });
 
+test("文字サイズ(fontScale)は往復で保たれ、端末に設定が無いときだけ反映する", () => {
+  const mk = (v) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: null, fontScale: v, records: [], logs: [] }])).backup;
+  assert.equal(mk(1.2).decks[0].fontScale, 1.2);
+  assert.deepEqual(Backup.plan(mk(1.4), [localDeck()]).writes.fontScale, [{ deckId: "D1", value: 1.4 }]);
+  assert.equal(Backup.plan(mk(1.4), [localDeck({ fontScale: 1 })]).writes.fontScale.length, 0, "端末に設定があれば上書きしない");
+  assert.equal(Backup.plan(mk(null), [localDeck()]).writes.fontScale.length, 0, "バックアップに設定が無ければ何もしない");
+  assert.match(Backup.describe(Backup.plan(mk(1.4), [localDeck()]), { done: true }), /文字サイズ: 特大 を反映しました/);
+});
+
+test("fontScale が選択肢に無い値のバックアップは拒否する。無い古い形式は読める", () => {
+  const f = JSON.parse(JSON.stringify(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: null, records: [], logs: [] }])));
+  delete f.decks[0].fontScale;
+  assert.equal(Backup.validate(f).ok, true);
+  for (const bad of [2, 0, "1.2", -1, 999]) { f.decks[0].fontScale = bad; assert.equal(Backup.validate(f).ok, false, `fontScale=${bad}`); }
+});
+
 test("新規上限(newPerDay)は端末に設定が無いときだけ反映する", () => {
   const mk = (n) => roundTrip(makeBackup([{ id: "D1", name: "デッキ1", newPerDay: n, records: [], logs: [] }])).backup;
   assert.equal(Backup.plan(mk(30), [localDeck({ newPerDay: null })]).writes.newPerDay.length, 1);

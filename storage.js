@@ -12,7 +12,7 @@
 //   reviewLogs   key: 自動採番            回答の履歴(いつ・どのボタン)。deckId, cardId, rating, review(ms) ...
 //
 // decks のレコードには、デッキごとの設定 newPerDay(新規の1日の上限)・showIpa(IPA を表示するか。
-// 無い・null は「表示する」)が入ることがある。
+// 無い・null は「表示する」)・fontScale(カードの文字の倍率。無い・null は 1)が入ることがある。
 // 一覧取得で大きい Blob を読まないよう、decks と deckFiles は分けてある。
 //
 // version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
@@ -156,6 +156,7 @@ const DeckStore = (() => {
         lastOpenedAt: now,
         ...(existing?.newPerDay != null && { newPerDay: existing.newPerDay }),
         ...(existing?.showIpa != null && { showIpa: existing.showIpa }),
+        ...(existing?.fontScale != null && { fontScale: existing.fontScale }),
       });
       s.deckFiles.put({ deckId: meta.id, blob });
     });
@@ -196,6 +197,20 @@ const DeckStore = (() => {
     await run(["decks"], "readwrite", async (s) => {
       const d = await reqToPromise(s.decks.get(id));
       if (d) s.decks.put({ ...d, showIpa: !!value });
+    });
+  }
+
+  // カードの文字の倍率(未設定・不正な値は 1)
+  async function getFontScale(id) {
+    const d = await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)));
+    return Backup.FONT_SCALES.includes(d?.fontScale) ? d.fontScale : 1;
+  }
+
+  async function setFontScale(id, value) {
+    if (!Backup.FONT_SCALES.includes(value)) throw new Error("文字サイズの値が正しくありません");
+    await run(["decks"], "readwrite", async (s) => {
+      const d = await reqToPromise(s.decks.get(id));
+      if (d) s.decks.put({ ...d, fontScale: value });
     });
   }
 
@@ -241,7 +256,7 @@ const DeckStore = (() => {
         reqToPromise(s.cardRecords.getAll()),
         reqToPromise(s.reviewLogs.getAll()),
       ]);
-      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, records: [], logs: [] }]));
+      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, records: [], logs: [] }]));
       for (const r of records) byId.get(r.deckId)?.records.push(r);
       for (const l of logs) byId.get(l.deckId)?.logs.push(l);
       return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -260,7 +275,7 @@ const DeckStore = (() => {
       const inBackup = new Set(backup.decks.map((d) => d.id));
       const local = [];
       for (const d of decks) {
-        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, records: [], logs: [], cardIds: null };
+        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, records: [], logs: [], cardIds: null };
         if (inBackup.has(d.id)) {
           const only = IDBKeyRange.only(d.id);
           entry.records = await reqToPromise(s.cardRecords.index("byDeck").getAll(only));
@@ -274,10 +289,11 @@ const DeckStore = (() => {
       if (!dryRun) {
         for (const r of p.writes.records) s.cardRecords.put(r);
         for (const l of p.writes.logs) s.reviewLogs.add(l); // id は自動採番
-        // 同じデッキに newPerDay と showIpa の両方を書くので、1 件ずつ最新の内容に重ねる
+        // 同じデッキに複数の設定を書くので、1 件ずつ最新の内容に重ねる
         const merged = new Map();
         for (const { deckId, value } of p.writes.newPerDay) merged.set(deckId, { ...merged.get(deckId), newPerDay: value });
         for (const { deckId, value } of p.writes.showIpa) merged.set(deckId, { ...merged.get(deckId), showIpa: value });
+        for (const { deckId, value } of p.writes.fontScale) merged.set(deckId, { ...merged.get(deckId), fontScale: value });
         for (const [deckId, patch] of merged) {
           const d = decks.find((x) => x.id === deckId);
           if (d) s.decks.put({ ...d, ...patch });
@@ -290,7 +306,7 @@ const DeckStore = (() => {
   return {
     requestPersistence, listDecks, findDuplicates, saveDeck,
     getDeckBlob, touchDeck, deleteDeck,
-    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getCardRecords, saveReview, countNewSince,
+    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getCardRecords, saveReview, countNewSince,
     exportAll, importMerge,
     channel: CHANNEL,
   };
