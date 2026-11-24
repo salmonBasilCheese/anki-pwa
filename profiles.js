@@ -20,6 +20,7 @@ const DECK_PROFILES = [
     audioButtons: { headword: "audioWord", exampleEN: "audioExample" },
     audioRows: [],
     ipa: "ipa",
+    longFront: false,
   },
   {
     // 文法デッキ。音声は裏面でだけ鳴らす(表で鳴ると答えが分かるため)
@@ -30,6 +31,7 @@ const DECK_PROFILES = [
     audioButtons: {},
     audioRows: ["audio"],
     ipa: null,
+    longFront: true, // 表面が文章。見出し語用の大きな中央寄せにしない
   },
 ];
 

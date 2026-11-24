@@ -627,6 +627,7 @@ function advance() {
 
   const p = state.profile;
   const ipaName = p.ipa && p.fields[p.ipa];
+  els.front.classList.toggle("prose", p.longFront);
   renderSide(els.front, state.layout.front, card);
   renderSide(els.back, state.showIpa ? state.layout.back : state.layout.back.filter((n) => n !== ipaName), card);
   els.back.hidden = true;
