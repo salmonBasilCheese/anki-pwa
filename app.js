@@ -1,27 +1,5 @@
 "use strict";
 
-// ---------------------------------------------------------------
-// デッキごとの決め打ち部分はここだけ。
-// 将来デッキごとに表裏のフィールドを選べるようにするときは、この
-// オブジェクトをデッキ単位の設定として差し替える。
-// 値は Anki のノートタイプ(col.models)のフィールド名。
-// ---------------------------------------------------------------
-const DECK_PROFILE = {
-  fields: {
-    headword: "Headword",
-    ipa: "IPA",
-    meaning: "Meaning",
-    exampleEN: "ExampleEN",
-    exampleJA: "ExampleJA",
-    audioWord: "AudioHW",
-    audioExample: "AudioEx",
-  },
-  front: ["headword"],
-  back: ["ipa", "meaning", "exampleEN", "exampleJA"],
-  // 音声ボタンを置く場所: 「表示する項目 → その横に置くボタンが鳴らす音声の項目」
-  audioButtons: { headword: "audioWord", exampleEN: "audioExample" },
-};
-
 // スピーカーのアイコン(固定のSVG。ユーザーのデータは含まない)
 const AUDIO_ICON =
   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
@@ -57,6 +35,7 @@ const state = {
   session: null,          // srs.js のセッション(出題状態)
   showIpa: true,          // 学習中のデッキで IPA を表示するか(デッキごとの設定)
   learnedOtherDecks: 0,   // 学習中以外のデッキで、すでに学習したカードの数
+  profile: null,          // 学習中のデッキの種類(profiles.js)
   layout: null,           // 表裏に出すフィールド名 { front: [...], back: [...] }(初期設定)
   current: null,          // 今出しているカード { cardId, kind, record, card }
   revealed: false,
@@ -79,7 +58,7 @@ function setHtml(el, html) {
 // 読み込み
 // ---------------------------------------------------------------
 // .apkg(Blob)を展開して中身を読む。画面や state は触らない(保存前の検証にも使う)。
-// 戻り値: { zip, mediaByName, cards, deck: {id, name, cardCount}, deckLabel, fieldNames, missingProfile }
+// 戻り値: { zip, mediaByName, cards, deck: {id, name, cardCount}, deckLabel, fieldNames, profile(合わなければ null) }
 async function parseApkg(blob) {
   const zip = await JSZip.loadAsync(blob);
 
@@ -153,12 +132,12 @@ async function readCollection(db, zip) {
     return { id, fields };
   });
 
-  // フィールド名の一覧と、初期設定(DECK_PROFILE)に足りないフィールド。
-  // 取り込むとき(importFile)と開くとき(startStudy)に、足りなければ止める。
+  // 項目名からデッキの種類(profiles.js)を選ぶ。合わなければ取り込むとき・開くときに止める。
   const firstCardFields = Object.keys(cards[0].fields);
-  const missingProfile = Object.values(DECK_PROFILE.fields).filter((n) => !firstCardFields.includes(n));
+  const profile = pickProfile(firstCardFields);
+  if (profile) deck.profile = profile.name;
 
-  return { mediaByName, cards, deck, deckLabel, fieldNames: firstCardFields, missingProfile };
+  return { mediaByName, cards, deck, deckLabel, fieldNames: firstCardFields, profile };
 }
 
 // ---------------------------------------------------------------
@@ -248,7 +227,9 @@ async function renderLibrary() {
 function buildSettingsPanel(d) {
   const panel = document.createElement("div");
   panel.className = "deck-settings";
-  panel.append(buildLimitInput(d), buildIpaToggle(d), buildFontScaleSelect(d));
+  panel.append(buildLimitInput(d));
+  if (profileByName(d.profile).ipa) panel.append(buildIpaToggle(d)); // IPA の無い種類では出さない
+  panel.append(buildFontScaleSelect(d));
   return panel;
 }
 
@@ -375,9 +356,7 @@ async function openSaved(id) {
 async function importFile(file) {
   setStatus("展開中...");
   const parsed = await parseApkg(file); // 壊れたファイルはここで失敗し、何も保存されない
-  if (parsed.missingProfile.length) { // 開けないデッキは保存しない
-    throw new Error("このデッキには初期設定の項目がありません(" + parsed.missingProfile.join(", ") + ")");
-  }
+  if (!parsed.profile) throw unsupportedDeck(parsed); // 開けないデッキは保存しない
 
   const dups = await DeckStore.findDuplicates(parsed.deck);
   if (dups.length > 0) {
@@ -580,11 +559,9 @@ async function startStudy(parsed) {
     .filter((d) => d.id !== state.deckId)
     .reduce((sum, d) => sum + d.learnedCount, 0);
 
+  if (!parsed.profile) throw unsupportedDeck(parsed);
+  state.profile = parsed.profile;
   await buildSession();
-  // 初期設定のフィールドが全部あることが必要
-  if (parsed.missingProfile.length) {
-    throw new Error("このデッキには初期設定の項目がありません(" + parsed.missingProfile.join(", ") + ")");
-  }
   els.library.hidden = true;
   els.viewer.hidden = false;
   setStatus("");
@@ -648,7 +625,8 @@ function advance() {
   const card = state.cardById.get(pick.cardId);
   state.current = { ...pick, card };
 
-  const ipaName = DECK_PROFILE.fields.ipa;
+  const p = state.profile;
+  const ipaName = p.ipa && p.fields[p.ipa];
   renderSide(els.front, state.layout.front, card);
   renderSide(els.back, state.showIpa ? state.layout.back : state.layout.back.filter((n) => n !== ipaName), card);
   els.back.hidden = true;
@@ -708,18 +686,23 @@ async function gradeCurrent(grade) {
 // 表示
 // ---------------------------------------------------------------
 function fieldValue(card, key) {
-  return card.fields[DECK_PROFILE.fields[key]] ?? "";
+  return card.fields[state.profile.fields[key]] ?? "";
+}
+
+function unsupportedDeck(parsed) {
+  return new Error("対応していないデッキです(項目: " + parsed.fieldNames.join(", ") + ")");
 }
 
 // フィールド名 → 役割(headword など)。初期設定に無いフィールドは null
 function roleOfField(name) {
-  return Object.keys(DECK_PROFILE.fields).find((k) => DECK_PROFILE.fields[k] === name) ?? null;
+  const F = state.profile.fields;
+  return Object.keys(F).find((k) => F[k] === name) ?? null;
 }
 
 // 表裏に出すフィールド名(初期設定)。項目の出し分けは IPA の表示・非表示だけ
 function resolveLayout() {
-  const F = DECK_PROFILE.fields;
-  return { front: DECK_PROFILE.front.map((k) => F[k]), back: DECK_PROFILE.back.map((k) => F[k]) };
+  const p = state.profile;
+  return { front: p.front.map((k) => p.fields[k]), back: p.back.map((k) => p.fields[k]) };
 }
 
 // names: 表示するフィールド名(Anki のフィールド名)
@@ -729,7 +712,17 @@ function renderSide(container, names, card) {
     const role = roleOfField(name);
     const div = document.createElement("div");
     div.className = "field " + (role ?? "other");
-    const audioKey = role && DECK_PROFILE.audioButtons[role];
+    if (role && state.profile.audioRows.includes(role)) {
+      // 音声だけの行: [sound:...] の文字は出さず、ボタンだけ置く(音声が無ければ行ごと出さない)
+      if (!soundName(card, role)) continue;
+      div.classList.add("audio-row");
+      div.append(buildAudioButton(card, role));
+      container.appendChild(div);
+      continue;
+    }
+    // 空の項目は出さない(空の行の余白で崩れないように)
+    if (!(card.fields[name] ?? "").replace(/<[^>]*>|&nbsp;|\s/g, "")) continue;
+    const audioKey = role && state.profile.audioButtons[role];
     if (audioKey) {
       // 項目の横に小さな音声ボタンを置く
       const text = document.createElement("div");

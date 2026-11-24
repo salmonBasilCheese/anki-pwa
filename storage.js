@@ -153,6 +153,7 @@ const DeckStore = (() => {
         name: meta.name,
         cardCount: meta.cardCount,
         size: blob.size,
+        ...(meta.profile && { profile: meta.profile }), // デッキの種類(profiles.js)。無い記録は単語デッキ扱い
         addedAt: existing?.addedAt ?? now,
         lastOpenedAt: now,
         ...(existing?.newPerDay != null && { newPerDay: existing.newPerDay }),

@@ -148,6 +148,8 @@
       flex: none; width: 40px; height: 40px; min-height: 0; padding: 0; border-radius: 50%;
       display: inline-flex; align-items: center; justify-content: center; color: var(--accent);
     }
+    .field.audio-row { display: flex; justify-content: center; }
+    .field.note, .field.source { color: var(--text-muted); font-size: 0.9em; }
     .audio-btn svg { width: 20px; height: 20px; pointer-events: none; }
 
     /* 答えを見る / 4つの回答ボタン: 画面の下端(親指の位置)。ホームバーの分は余白で避ける */
@@ -287,6 +289,7 @@
   <script src="lib/sql-wasm.js"></script>
   <script src="lib/purify.min.js"></script>
   <script src="lib/ts-fsrs.umd.js"></script>
+  <script src="profiles.js"></script>
   <script src="backup.js"></script>
   <script src="storage.js"></script>
   <script src="srs.js"></script>
