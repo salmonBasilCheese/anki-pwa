@@ -168,6 +168,8 @@ async function renderLibrary() {
     });
     return [d.id, left];
   })));
+  // 今日の残り枚数が多いデッキほど上に並べる(同じ枚数なら、listDecks の「最後に開いた順」のまま)
+  decks.sort((a, b) => remainingById.get(b.id) - remainingById.get(a.id));
   els.deckList.replaceChildren();
 
   if (decks.length === 0) {
