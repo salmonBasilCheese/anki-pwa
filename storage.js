@@ -8,15 +8,21 @@
 //   deckFiles    key: deckId              {deckId, blob}   .apkg の Blob そのまま
 //   progress     key: deckId              旧「最後に見た位置」。復習画面では使わない(残してあるだけ)
 //   cardRecords  key: [deckId, cardId]    カードごとの FSRS の状態(srs.js の record)。
-//                                         記録が無いカード = 新規
+//                                         記録が無いカード = 新規。cardId はカードキー(note の guid。relink.js)
 //   reviewLogs   key: 自動採番            回答の履歴(いつ・どのボタン)。deckId, cardId, rating, review(ms) ...
+//   unlinkedRecords key: 自動採番(uid)   どのカードにも結び付かない学習記録の置き場(消さずに残す)
 //
 // decks のレコードには、デッキごとの設定 newPerDay(新規の1日の上限)・showIpa(IPA を表示するか。
 // 無い・null は「表示する」)・fontScale(カードの文字の倍率。無い・null は 1)・
-// layout(表示する項目 { front: [フィールド名], back: [...] }。無い・null は初期設定)が入ることがある。
+// layout(表示する項目 { front: [フィールド名], back: [...] }。無い・null は初期設定)・
+// autoPlay(表を出したときに単語の音声を自動で鳴らすか。無い・null は「鳴らさない」)が入ることがある。
+// keyType: "guid" は、記録の付け替え(relinkIn)が済んでいるという目印。
 // 一覧取得で大きい Blob を読まないよう、decks と deckFiles は分けてある。
 //
 // version 2: reviewLogs を追加(1 → 2 では既存データはそのまま残る)
+// version 3: unlinkedRecords を追加(2 → 3 では既存データはそのまま残る)。
+//   カードの識別を数値のカード ID から note の guid に変えた。記録の書き換えは .apkg を読まないと
+//   できないので、アップグレードでは行わず、.apkg を読んだときに relinkIn で行う。
 //
 // 版(channel): 公開 URL のパスに /dev/ を含めば開発版("dev")、それ以外は安定版("stable")。
 // 同じオリジンでは IndexedDB・localStorage・キャッシュを共有してしまうため、開発版は保存先の
@@ -28,8 +34,8 @@
 const DeckStore = (() => {
   const CHANNEL = location.pathname.includes("/dev/") ? "dev" : "stable";
   const DB_NAME = CHANNEL === "dev" ? "anki-pwa-dev" : "anki-pwa";
-  const DB_VERSION = 2;
-  const ALL_STORES = ["decks", "deckFiles", "progress", "cardRecords", "reviewLogs"];
+  const DB_VERSION = 3;
+  const ALL_STORES = ["decks", "deckFiles", "progress", "cardRecords", "reviewLogs", "unlinkedRecords"];
 
   let dbPromise = null;
 
@@ -56,6 +62,10 @@ const DeckStore = (() => {
           const s = db.createObjectStore("reviewLogs", { keyPath: "id", autoIncrement: true });
           s.createIndex("byDeck", "deckId");
           s.createIndex("byDeckTime", ["deckId", "review"]);
+        }
+        if (!db.objectStoreNames.contains("unlinkedRecords")) {
+          const s = db.createObjectStore("unlinkedRecords", { keyPath: "uid", autoIncrement: true });
+          s.createIndex("byDeck", "deckId");
         }
       };
       req.onsuccess = () => {
@@ -98,9 +108,36 @@ const DeckStore = (() => {
     stores.decks.delete(id);
     stores.deckFiles.delete(id);
     stores.progress.delete(id);
-    stores.cardRecords.delete(IDBKeyRange.bound([id, -Infinity], [id, Infinity]));
-    const logKeys = await reqToPromise(stores.reviewLogs.index("byDeck").getAllKeys(IDBKeyRange.only(id)));
-    for (const k of logKeys) stores.reviewLogs.delete(k);
+    // cardId は数値(古い記録)と文字列(カードキー)が混ざるので、範囲ではなく索引で集めて消す
+    for (const name of ["cardRecords", "reviewLogs", "unlinkedRecords"]) {
+      const keys = await reqToPromise(stores[name].index("byDeck").getAllKeys(IDBKeyRange.only(id)));
+      for (const k of keys) stores[name].delete(k);
+    }
+  }
+
+  // 記録の付け替え(呼び出し側のトランザクション内で使う。要るストア: decks, cardRecords, reviewLogs, unlinkedRecords)
+  //  cards: 今のデッキのカード [{ key, cid }]
+  // デッキにあるカードの記録はカードキーで結び付け直し、無いカードの記録は unlinkedRecords に移す。
+  // 戻り値: Relink.plan の stats と groups
+  async function relinkIn(stores, deckId, cards) {
+    if (!Array.isArray(cards)) throw new Error("カードの一覧が渡されていません");
+    const only = IDBKeyRange.only(deckId);
+    const [records, unlinked, logs] = await Promise.all([
+      reqToPromise(stores.cardRecords.index("byDeck").getAll(only)),
+      reqToPromise(stores.unlinkedRecords.index("byDeck").getAll(only)),
+      reqToPromise(stores.reviewLogs.index("byDeck").getAll(only)),
+    ]);
+    const p = Relink.plan({ cards, records, unlinked });
+    for (const cardId of p.recordsDelete) stores.cardRecords.delete([deckId, cardId]);
+    for (const r of p.recordsPut) stores.cardRecords.put({ ...r, deckId });
+    for (const uid of p.unlinkedDelete) stores.unlinkedRecords.delete(uid);
+    for (const r of p.unlinkedAdd) stores.unlinkedRecords.add({ ...r, deckId });
+    for (const l of logs) {
+      if (typeof l.cardId === "number" && p.logKey.has(l.cardId)) stores.reviewLogs.put({ ...l, cardId: p.logKey.get(l.cardId) });
+    }
+    const d = await reqToPromise(stores.decks.get(deckId));
+    if (d && d.keyType !== "guid") stores.decks.put({ ...d, keyType: "guid" });
+    return { stats: p.stats, groups: p.groups };
   }
 
   // -------------------------------------------------------------
@@ -136,12 +173,14 @@ const DeckStore = (() => {
   }
 
   // デッキを保存する。replaceIds に入れた既存デッキは同じトランザクション内で置き換える。
-  //  - id が同じ既存デッキ: 学習記録・回答履歴・新規の上限設定を引き継ぐ
+  //  cards: このデッキのカード [{ key, cid }]。同じトランザクションで記録を付け替える
+  //  - id が同じ既存デッキ: 学習記録・回答履歴・設定を引き継ぐ
   //  - id が違う既存デッキ(名前だけ一致): 全データを削除し、新規として扱う
   // 途中で失敗(容量不足など)したら全体がロールバックされる。
-  async function saveDeck(meta, blob, { replaceIds = [] } = {}) {
+  async function saveDeck(meta, blob, { replaceIds = [], cards } = {}) {
+    if (!Array.isArray(cards)) throw new Error("カードの一覧が渡されていません");
     const now = Date.now();
-    await run(ALL_STORES, "readwrite", async (s) => {
+    return run(ALL_STORES, "readwrite", async (s) => {
       const existing = await reqToPromise(s.decks.get(meta.id));
 
       for (const oldId of replaceIds) {
@@ -160,9 +199,21 @@ const DeckStore = (() => {
         ...(existing?.showIpa != null && { showIpa: existing.showIpa }),
         ...(existing?.fontScale != null && { fontScale: existing.fontScale }),
         ...(existing?.layout != null && { layout: existing.layout }),
+        ...(existing?.autoPlay != null && { autoPlay: existing.autoPlay }),
+        ...(existing?.keyType != null && { keyType: existing.keyType }),
       });
       s.deckFiles.put({ deckId: meta.id, blob });
+      return relinkIn(s, meta.id, cards);
     });
+  }
+
+  // 保存済みデッキの記録を付け替える(更新後の初回起動・開くときに、まだ済んでいないデッキに行う)
+  async function relinkDeck(deckId, cards) {
+    return run(["decks", "cardRecords", "reviewLogs", "unlinkedRecords"], "readwrite", (s) => relinkIn(s, deckId, cards));
+  }
+
+  async function getDeck(id) {
+    return (await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)))) ?? null;
   }
 
   async function getDeckBlob(id) {
@@ -200,6 +251,19 @@ const DeckStore = (() => {
     await run(["decks"], "readwrite", async (s) => {
       const d = await reqToPromise(s.decks.get(id));
       if (d) s.decks.put({ ...d, showIpa: !!value });
+    });
+  }
+
+  // 表を出したときに単語の音声を自動で鳴らすか(未設定なら false)
+  async function getAutoPlay(id) {
+    const d = await run(["decks"], "readonly", (s) => reqToPromise(s.decks.get(id)));
+    return d?.autoPlay === true;
+  }
+
+  async function setAutoPlay(id, value) {
+    await run(["decks"], "readwrite", async (s) => {
+      const d = await reqToPromise(s.decks.get(id));
+      if (d) s.decks.put({ ...d, autoPlay: !!value });
     });
   }
 
@@ -270,39 +334,43 @@ const DeckStore = (() => {
   // バックアップ(計算は backup.js。ここは読み書きだけ)
   // -------------------------------------------------------------
 
-  // 書き出し用: 全デッキの学習記録・回答履歴・設定(新規上限・IPA 表示)。Backup.build に渡す形で返す(Blob は読まない)。
+  // 書き出し用: 全デッキの学習記録・結び付かない記録・回答履歴・設定。Backup.build に渡す形で返す(Blob は読まない)。
   async function exportAll() {
-    return run(["decks", "cardRecords", "reviewLogs"], "readonly", async (s) => {
-      const [decks, records, logs] = await Promise.all([
+    return run(["decks", "cardRecords", "reviewLogs", "unlinkedRecords"], "readonly", async (s) => {
+      const [decks, records, logs, unlinked] = await Promise.all([
         reqToPromise(s.decks.getAll()),
         reqToPromise(s.cardRecords.getAll()),
         reqToPromise(s.reviewLogs.getAll()),
+        reqToPromise(s.unlinkedRecords.getAll()),
       ]);
-      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, records: [], logs: [] }]));
+      const byId = new Map(decks.map((d) => [d.id, { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, autoPlay: d.autoPlay ?? null, records: [], logs: [], unlinked: [] }]));
       for (const r of records) byId.get(r.deckId)?.records.push(r);
       for (const l of logs) byId.get(l.deckId)?.logs.push(l);
+      for (const u of unlinked) byId.get(u.deckId)?.unlinked.push(u);
       return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
     });
   }
 
   // バックアップを端末に統合する。dryRun: true なら何も書かず、結果の見込みだけ返す。
-  //  backup: Backup.validate 済み / cardIdsByDeck: Map(deckId → そのデッキに実在するカード ID の Set)
+  //  backup: Backup.validate 済み / cardsByDeck: Map(deckId → そのデッキのカード [{ key, cid }])
+  // 書き込んだデッキは、同じトランザクションで記録を付け替える(古いバックアップの数値 ID もここで結び付く)。
   // 端末の現在の状態は同じトランザクション内で読み直して統合を計算するので、
   // 確認画面を出している間に端末側が変わっていても、新しい記録を上書きしない。
   // 途中で失敗したら全体がロールバックされる。
-  async function importMerge(backup, cardIdsByDeck, { dryRun }) {
+  async function importMerge(backup, cardsByDeck, { dryRun }) {
     const mode = dryRun ? "readonly" : "readwrite";
-    return run(["decks", "cardRecords", "reviewLogs"], mode, async (s) => {
+    return run(["decks", "cardRecords", "reviewLogs", "unlinkedRecords"], mode, async (s) => {
       const decks = await reqToPromise(s.decks.getAll());
       const inBackup = new Set(backup.decks.map((d) => d.id));
       const local = [];
       for (const d of decks) {
-        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, records: [], logs: [], cardIds: null };
+        const entry = { id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: d.fontScale ?? null, layout: d.layout ?? null, autoPlay: d.autoPlay ?? null, records: [], logs: [], unlinked: [], cards: null };
         if (inBackup.has(d.id)) {
           const only = IDBKeyRange.only(d.id);
           entry.records = await reqToPromise(s.cardRecords.index("byDeck").getAll(only));
           entry.logs = await reqToPromise(s.reviewLogs.index("byDeck").getAll(only));
-          entry.cardIds = cardIdsByDeck.get(d.id) ?? null;
+          entry.unlinked = await reqToPromise(s.unlinkedRecords.index("byDeck").getAll(only));
+          entry.cards = cardsByDeck.get(d.id) ?? null;
         }
         local.push(entry);
       }
@@ -310,6 +378,7 @@ const DeckStore = (() => {
       const p = Backup.plan(backup, local);
       if (!dryRun) {
         for (const r of p.writes.records) s.cardRecords.put(r);
+        for (const r of p.writes.unlinked) s.unlinkedRecords.add(r); // uid は自動採番
         for (const l of p.writes.logs) s.reviewLogs.add(l); // id は自動採番
         // 同じデッキに複数の設定を書くので、1 件ずつ最新の内容に重ねる
         const merged = new Map();
@@ -317,9 +386,13 @@ const DeckStore = (() => {
         for (const { deckId, value } of p.writes.showIpa) merged.set(deckId, { ...merged.get(deckId), showIpa: value });
         for (const { deckId, value } of p.writes.fontScale) merged.set(deckId, { ...merged.get(deckId), fontScale: value });
         for (const { deckId, value } of p.writes.layout) merged.set(deckId, { ...merged.get(deckId), layout: value });
+        for (const { deckId, value } of p.writes.autoPlay) merged.set(deckId, { ...merged.get(deckId), autoPlay: value });
         for (const [deckId, patch] of merged) {
           const d = decks.find((x) => x.id === deckId);
           if (d) s.decks.put({ ...d, ...patch });
+        }
+        for (const d of p.decks) {
+          if (d.status === "ok") await relinkIn(s, d.id, cardsByDeck.get(d.id));
         }
       }
       return p;
@@ -327,9 +400,9 @@ const DeckStore = (() => {
   }
 
   return {
-    requestPersistence, listDecks, findDuplicates, saveDeck,
+    requestPersistence, listDecks, findDuplicates, saveDeck, relinkDeck, getDeck,
     getDeckBlob, touchDeck, deleteDeck,
-    getNewPerDay, setNewPerDay, getShowIpa, setShowIpa, getFontScale, setFontScale, getLayout, setLayout, getCardRecords, saveReview, countNewSince,
+    getNewPerDay, setNewPerDay, getAutoPlay, setAutoPlay, getShowIpa, setShowIpa, getFontScale, setFontScale, getLayout, setLayout, getCardRecords, saveReview, countNewSince,
     exportAll, importMerge,
     channel: CHANNEL,
   };

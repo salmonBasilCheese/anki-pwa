@@ -31,10 +31,11 @@ const state = {
   deckId: null,           // 学習中のデッキID(保存済みデッキのキー)
   zip: null,
   mediaByName: new Map(), // "example_0001.mp3" -> "123"(zip内のファイル名)
-  cards: [],              // 並び順どおりの { id, fields: {フィールド名: 値} }
+  cards: [],              // 並び順どおりの { id: カードキー(relink.js), cid: 数値のカード ID, fields: {フィールド名: 値} }
   cardById: new Map(),
   session: null,          // srs.js のセッション(出題状態)
   showIpa: true,          // 学習中のデッキで IPA を表示するか(デッキごとの設定)
+  autoPlay: false,        // 表を出したときに単語の音声を自動で鳴らすか(デッキごとの設定)
   learnedOtherDecks: 0,   // 学習中以外のデッキで、すでに学習したカードの数
   profile: null,          // 学習中のデッキの種類(profiles.js)
   layout: null,           // 表裏に出すフィールド名 { front: [...], back: [...] }(初期設定)
@@ -42,7 +43,8 @@ const state = {
   revealed: false,
   busy: false,            // 回答の保存中
   audioUrls: new Map(),   // 現在のカードで作った Blob URL
-  player: null,
+  player: new Audio(),    // 音声はこの 1 つで鳴らす(iPhone はタップで一度鳴らした要素なら、あとから自動で鳴らせる)
+  audioUnlocked: false,
 };
 
 function setStatus(msg, isError = false) {
@@ -121,16 +123,18 @@ async function readCollection(db, zip) {
   }
 
   // 新規カードの並びは Anki と同じ cards.due(新規の出題位置)順、同値は id 順
+  // カードの識別は note の guid(デッキを作り直しても変わらない。relink.js)
   const rows = db.exec(
-    "SELECT c.id, n.mid, n.flds FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.due, c.id"
+    "SELECT c.id, c.ord, n.guid, n.mid, n.flds FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.due, c.id"
   )[0].values;
 
-  const cards = rows.map(([id, mid, flds]) => {
+  const keys = Relink.cardsFrom(rows.map(([cid, ord, guid]) => ({ cid, ord, guid })));
+  const cards = rows.map(([cid, , , mid, flds], i) => {
     const names = fieldNames.get(String(mid)) ?? [];
     const values = String(flds).split("\x1f");
     const fields = {};
-    names.forEach((name, i) => { fields[name] = values[i] ?? ""; });
-    return { id, fields };
+    names.forEach((name, j) => { fields[name] = values[j] ?? ""; });
+    return { id: keys[i].key, cid, fields };
   });
 
   // 項目名からデッキの種類(profiles.js)を選ぶ。合わなければ取り込むとき・開くときに止める。
@@ -239,6 +243,7 @@ function buildSettingsPanel(d) {
   panel.className = "deck-settings";
   panel.append(buildLimitInput(d));
   if (profileByName(d.profile).ipa) panel.append(buildIpaToggle(d)); // IPA の無い種類では出さない
+  if (profileByName(d.profile).autoPlay) panel.append(buildAutoPlayToggle(d)); // 表で鳴らす音声の無い種類では出さない
   panel.append(buildFontScaleSelect(d));
   return panel;
 }
@@ -292,6 +297,29 @@ function buildIpaToggle(d) {
     }
   });
   label.append(box, "IPA(発音記号)を表示する");
+  return label;
+}
+
+// 表を出したときに単語の音声を自動で鳴らすか(デッキごと。未設定は鳴らさない)
+function buildAutoPlayToggle(d) {
+  const label = document.createElement("label");
+  label.className = "deck-toggle";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  let saved = d.autoPlay === true;
+  box.checked = saved;
+  box.addEventListener("change", async () => {
+    const want = box.checked;
+    try {
+      await DeckStore.setAutoPlay(d.id, want);
+      saved = want;
+    } catch (e) {
+      console.error(e);
+      box.checked = saved;
+      setStatus("設定を保存できませんでした: " + describeError(e), true);
+    }
+  });
+  label.append(box, "単語の音声を自動で再生する");
   return label;
 }
 
@@ -350,11 +378,14 @@ async function updatePersistStatus() {
 }
 
 async function openSaved(id) {
+  unlockAudio(); // タップの直後に呼ぶ(待ったあとでは iPhone が許可しない)
   try {
     setStatus("読み込み中...");
     const blob = await DeckStore.getDeckBlob(id);
     if (!blob) throw new Error("保存データが見つかりません");
     const parsed = await parseApkg(blob);
+    // 記録の付け替えがまだなら、ここで行う(起動時にできなかった場合)
+    if ((await DeckStore.getDeck(id))?.keyType !== "guid") await DeckStore.relinkDeck(id, cardKeysOf(parsed.cards));
     await DeckStore.touchDeck(id);
     await startStudy(parsed);
   } catch (e) {
@@ -378,10 +409,36 @@ async function importFile(file) {
   }
 
   setStatus("保存中...");
-  await DeckStore.saveDeck(parsed.deck, file, { replaceIds: dups.map((d) => d.id) });
+  await DeckStore.saveDeck(parsed.deck, file, { replaceIds: dups.map((d) => d.id), cards: cardKeysOf(parsed.cards) });
   await updatePersistStatus(); // ユーザー操作の直後なので許可されやすい
   await renderLibrary(); // 項目が足りず開けない場合でも、保存したデッキを一覧に出す
   await startStudy(parsed);
+}
+
+// 記録の付け替え(relink.js)に渡す形 [{ key, cid }]
+function cardKeysOf(cards) {
+  return cards.map((c) => ({ key: c.id, cid: c.cid }));
+}
+
+// 更新後の初回起動: 記録の付け替えがまだのデッキを、1つずつ .apkg を読んで付け替える。
+// 失敗したデッキはそのまま残し(開くときにもう一度試す)、ほかのデッキは続ける。
+async function relinkPendingDecks() {
+  const pending = (await DeckStore.listDecks()).filter((d) => d.keyType !== "guid");
+  let failed = 0;
+  for (const [i, d] of pending.entries()) {
+    setStatus(`学習記録を新しい形に更新しています (${i + 1}/${pending.length})...`);
+    try {
+      const blob = await DeckStore.getDeckBlob(d.id);
+      if (!blob) throw new Error("保存データが見つかりません");
+      await DeckStore.relinkDeck(d.id, await readCardKeys(blob));
+    } catch (e) {
+      console.error(e);
+      failed++;
+    }
+  }
+  if (pending.length) {
+    setStatus(failed ? `学習記録の更新に失敗したデッキがあります(${failed}件)。開くときにもう一度試します` : "", failed > 0);
+  }
 }
 
 async function removeDeck(d) {
@@ -432,16 +489,17 @@ function setBackupBusy(busy) {
   els.backupImport.disabled = busy;
 }
 
-// .apkg の中の全カード ID(読み込むバックアップがこのデッキに合うか調べるために使う)
-async function readCardIds(blob) {
+// .apkg の中の全カードの [{ key: カードキー, cid: 数値のカード ID }](記録の付け替え・バックアップの読み込みに使う)
+async function readCardKeys(blob) {
   const zip = await JSZip.loadAsync(blob);
   const entry = zip.file("collection.anki21");
   if (!entry) throw new Error("collection.anki21 が見つかりません(この形式は未対応です)");
   const SQL = await initSqlJs({ locateFile: (f) => "lib/" + f });
   const db = new SQL.Database(await entry.async("uint8array"));
   try {
-    const rows = db.exec("SELECT id FROM cards")[0]?.values ?? [];
-    return new Set(rows.map((r) => r[0]));
+    // 並び順はカードキーの決め方(重なりの見分け)に関わるので、学習画面の読み込みと同じ順にする
+    const rows = db.exec("SELECT c.id, c.ord, n.guid FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.due, c.id")[0]?.values ?? [];
+    return Relink.cardsFrom(rows.map(([cid, ord, guid]) => ({ cid, ord, guid })));
   } finally {
     db.close();
   }
@@ -519,20 +577,20 @@ async function importBackup(file) {
   if (!v.ok) throw new Error(v.error);
   const backup = v.backup;
 
-  // バックアップに含まれ、端末にもあるデッキについて、実在するカード ID を .apkg から調べる
+  // バックアップに含まれ、端末にもあるデッキについて、カードの一覧を .apkg から調べる
   const local = await DeckStore.listDecks();
   const localIds = new Set(local.map((d) => d.id));
   const targets = backup.decks.filter((d) => localIds.has(d.id));
-  const cardIdsByDeck = new Map();
+  const cardsByDeck = new Map();
   for (const [i, d] of targets.entries()) {
     setStatus(`デッキを確認中 (${i + 1}/${targets.length})...`);
     const blob = await DeckStore.getDeckBlob(d.id);
     if (!blob) throw new Error(`デッキ「${d.name}」の保存データが見つかりません`);
-    cardIdsByDeck.set(d.id, await readCardIds(blob));
+    cardsByDeck.set(d.id, await readCardKeys(blob));
   }
 
   // まず何も書かずに結果の見込みを出し、確認してから書き込む
-  const preview = await DeckStore.importMerge(backup, cardIdsByDeck, { dryRun: true });
+  const preview = await DeckStore.importMerge(backup, cardsByDeck, { dryRun: true });
   const previewText = Backup.describe(preview, { done: false });
   if (!preview.hasChanges) {
     els.backupResult.textContent = "反映するものはありませんでした。\n" + previewText;
@@ -547,7 +605,7 @@ async function importBackup(file) {
   }
 
   setStatus("読み込み中...");
-  const result = await DeckStore.importMerge(backup, cardIdsByDeck, { dryRun: false });
+  const result = await DeckStore.importMerge(backup, cardsByDeck, { dryRun: false });
   els.backupResult.textContent = Backup.describe(result, { done: true });
   await renderLibrary();
   const warn = result.totals.orphanCards > 0 || result.totals.missingDecks > 0;
@@ -582,14 +640,16 @@ async function startStudy(parsed) {
 async function buildSession() {
   const id = state.deckId;
   const nowMs = Srs.now();
-  const [records, limit, showIpa, fontScale, newToday] = await Promise.all([
+  const [records, limit, showIpa, autoPlay, fontScale, newToday] = await Promise.all([
     DeckStore.getCardRecords(id),
     DeckStore.getNewPerDay(id),
     DeckStore.getShowIpa(id),
+    DeckStore.getAutoPlay(id),
     DeckStore.getFontScale(id),
     DeckStore.countNewSince(id, Srs.dayStart(nowMs), Srs.nextDayStart(nowMs)),
   ]);
   state.showIpa = showIpa;
+  state.autoPlay = autoPlay;
   state.layout = resolveLayout();
   els.card.style.setProperty("--card-scale", String(fontScale));
   state.session = Srs.createSession({
@@ -644,6 +704,9 @@ function advance() {
   els.grades.hidden = true;
   els.showAnswer.hidden = false;
   els.card.scrollTop = 0; // 前のカードで下までスクロールしていても、先頭から見せる
+
+  // 表を出したときに単語の音声を 1 回鳴らす(設定がオンのときだけ。鳴らせなくても黙って続ける)
+  if (state.autoPlay && p.autoPlay) playSound(p.autoPlay).catch((e) => console.warn("自動再生できませんでした", e));
 }
 
 // 出せるカードが無いときの画面。あとで出る学習中カードがあれば「今はここまで」として目立たせる
@@ -775,9 +838,33 @@ function hasAudio(name) {
 }
 
 function releaseAudio() {
-  if (state.player) { state.player.pause(); state.player = null; }
+  state.player.pause();
+  state.player.removeAttribute("src");
   for (const url of state.audioUrls.values()) URL.revokeObjectURL(url);
   state.audioUrls.clear();
+}
+
+// 無音(0.1 秒)の WAV。タップの直後にこれを鳴らしておくと、あとから自動で音声を鳴らせる(iPhone)
+function silentWavUrl() {
+  const n = 800, buf = new DataView(new ArrayBuffer(44 + n));
+  const text = (o, t) => [...t].forEach((ch, i) => buf.setUint8(o + i, ch.charCodeAt(0)));
+  text(0, "RIFF"); buf.setUint32(4, 36 + n, true); text(8, "WAVEfmt ");
+  buf.setUint32(16, 16, true); buf.setUint16(20, 1, true); buf.setUint16(22, 1, true);
+  buf.setUint32(24, 8000, true); buf.setUint32(28, 8000, true); buf.setUint16(32, 1, true); buf.setUint16(34, 8, true);
+  text(36, "data"); buf.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) buf.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+// タップ(ユーザー操作)の中で呼ぶ。1 回できれば十分
+function unlockAudio() {
+  if (state.audioUnlocked) return;
+  const url = silentWavUrl();
+  state.player.src = url;
+  state.audioUnlocked = true; // タップの中で play() を呼んだ時点で、この要素は鳴らせるようになる
+  state.player.play()
+    .catch(() => { /* 許可されなくても、音声ボタンはそのまま使える */ })
+    .finally(() => setTimeout(() => URL.revokeObjectURL(url), 1000));
 }
 
 async function playSound(profileKey) {
@@ -793,8 +880,8 @@ async function playSound(profileKey) {
     url = URL.createObjectURL(new Blob([blob], { type: "audio/mpeg" }));
     state.audioUrls.set(name, url);
   }
-  if (state.player) state.player.pause();
-  state.player = new Audio(url);
+  state.player.pause();
+  state.player.src = url;
   await state.player.play();
 }
 
@@ -920,6 +1007,7 @@ async function showVersion() {
 els.file.addEventListener("change", async () => {
   const file = els.file.files[0];
   if (!file) return;
+  unlockAudio();
   try {
     await importFile(file);
   } catch (e) {
@@ -956,7 +1044,7 @@ els.backToLibrary.addEventListener("click", async () => {
 els.card.addEventListener("click", revealAnswer);
 els.showAnswer.addEventListener("click", revealAnswer);
 for (const btn of els.gradeButtons) {
-  btn.addEventListener("click", () => gradeCurrent(Number(btn.dataset.grade)));
+  btn.addEventListener("click", () => { unlockAudio(); gradeCurrent(Number(btn.dataset.grade)); });
 }
 
 // キーボード(PC): Space=答えを見る、1〜4=もう一度/難しい/正解/簡単
@@ -1064,6 +1152,7 @@ function initServiceWorker() {
   showVersion();
   renderBackupStatus();
   try {
+    await relinkPendingDecks(); // 更新後の初回だけ時間がかかる(一覧の枚数を正しくするため、先に行う)
     await renderLibrary();
     await updatePersistStatus();
   } catch (e) {

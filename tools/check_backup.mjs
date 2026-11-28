@@ -16,18 +16,19 @@ function test(name, fn) {
 
 // ---- 測定用データ ----
 const rec = (cardId, last, extra = {}) => ({
-  cardId, state: 2, due: 1000 + cardId, stability: 3.5, difficulty: 5.2, scheduled_days: 3,
+  cardId, state: 2, due: 1000 + (typeof cardId === "number" ? cardId : 0), stability: 3.5, difficulty: 5.2, scheduled_days: 3,
   learning_steps: 0, reps: 2, lapses: 0, last_review: last, ...extra,
 });
 const log = (cardId, review, extra = {}) => ({
   cardId, rating: 3, state: 0, due: 500, stability: 1, difficulty: 4, scheduled_days: 0,
   learning_steps: 0, review, ...extra,
 });
-const ids = (...n) => new Set(n);
+// 端末のデッキのカード [{ key, cid }]。ここでは簡単のため、カードキーと数値の ID を同じ数にする
+const ids = (...n) => n.map((x) => ({ key: x, cid: x }));
 
 // 端末のデッキ(local の1要素)
 const localDeck = (over = {}) => ({
-  id: "D1", name: "デッキ1", newPerDay: null, records: [], logs: [], cardIds: ids(1, 2, 3), ...over,
+  id: "D1", name: "デッキ1", newPerDay: null, records: [], logs: [], unlinked: [], cards: ids(1, 2, 3), ...over,
 });
 
 // plan の結果を端末に適用する(storage.js の importMerge がやることの模倣)
@@ -38,6 +39,7 @@ function apply(local, p) {
     d.records = d.records.filter((x) => x.cardId !== r.cardId).concat(r);
   }
   for (const l of p.writes.logs) next.find((x) => x.id === l.deckId).logs.push(l);
+  for (const r of p.writes.unlinked) next.find((x) => x.id === r.deckId).unlinked.push(r);
   for (const { deckId, value } of p.writes.newPerDay) next.find((x) => x.id === deckId).newPerDay = value;
   return next;
 }
@@ -197,30 +199,73 @@ test("新規上限(newPerDay)は端末に設定が無いときだけ反映する
   assert.equal(Backup.plan(mk(null), [localDeck({ newPerDay: null })]).writes.newPerDay.length, 0);
 });
 
-// ---- 追加要件: 該当カードなし(デッキを作り直して ID が変わった場合など)は黙って捨てない ----
-test("一部のカードが端末のデッキに無い: その分はスキップし、枚数を数えて表示する", () => {
+// ---- 該当カードなし(デッキを作り直して ID が変わった場合など)は黙って捨てない ----
+test("一部のカードが端末のデッキに無い: その分は「結び付かない記録」として残し、枚数を表示する", () => {
   const b = roundTrip(makeBackup([{ id: "D1", name: "デッキ1", records: [rec(1, 100), rec(99, 100), rec(98, 100)], logs: [log(1, 100), log(99, 100)] }])).backup;
   const local = [localDeck()]; // カード 1,2,3 だけが実在
   const p = Backup.plan(b, local);
   assert.equal(p.totals.recordsApply, 1);
   assert.equal(p.totals.orphanCards, 2, "99 と 98");
   assert.equal(p.totals.orphanLogs, 1);
-  assert.deepEqual(p.writes.records.map((r) => r.cardId), [1], "該当なしの記録は書き込まれない");
-  assert.deepEqual(p.writes.logs.map((l) => l.cardId), [1]);
-  const preview = Backup.describe(p, { done: false });
-  assert.match(preview, /2 枚は該当カードなしでスキップ/);
-  const result = Backup.describe(p, { done: true });
-  assert.match(result, /2 枚は該当カードなしでスキップ/);
+  assert.deepEqual(p.writes.records.map((r) => r.cardId), [1], "学習記録に入るのは該当するカードだけ");
+  assert.deepEqual(p.writes.unlinked.map((r) => r.cardId).sort(), [98, 99], "該当なしの記録は置き場に残す");
+  assert.deepEqual(p.writes.logs.map((l) => l.cardId), [1, 99], "履歴は元の ID のまま残す");
+  assert.match(Backup.describe(p, { done: false }), /2 枚はデッキに該当するカードがありません。消さずに「結び付かない記録」として保存します/);
+  assert.match(Backup.describe(p, { done: true }), /保存しました/);
+  // 2 回目は増えない
+  const p2 = Backup.plan(b, apply(local, p));
+  assert.equal(p2.hasChanges, false);
 });
 
-test("デッキを作り直して全カードの ID が変わった: 全部スキップされ、警告が出て、何も書かれない", () => {
+test("デッキを作り直して全カードの ID が変わった: 学習記録には書かず、全部を置き場に残して警告する", () => {
   const b = roundTrip(makeBackup([{ id: "D1", name: "デッキ1", records: [rec(1, 100), rec(2, 100), rec(3, 100)], logs: [log(1, 100)] }])).backup;
-  const local = [localDeck({ cardIds: ids(1001, 1002, 1003) })]; // ID が全部違う
+  const local = [localDeck({ cards: ids(1001, 1002, 1003) })]; // ID が全部違う
   const p = Backup.plan(b, local);
-  assert.equal(p.hasChanges, false);
+  assert.equal(p.writes.records.length, 0);
+  assert.equal(p.writes.unlinked.length, 3);
   assert.equal(p.totals.orphanCards, 3);
   assert.equal(p.totals.recordsApply, 0);
-  assert.match(Backup.describe(p, { done: false }), /3 枚は該当カードなしでスキップ/);
+  assert.match(Backup.describe(p, { done: false }), /3 枚はデッキに該当するカードがありません/);
+});
+
+test("古い形式(数値のカード ID)のバックアップは、.apkg のカード一覧でカードキー(guid)に直して読む", () => {
+  const old = JSON.parse(JSON.stringify(makeBackup([{ id: "D1", name: "デッキ1", records: [rec(11, 100), rec(13, 200)], logs: [log(11, 100)] }])));
+  old.schemaVersion = 1;
+  for (const d of old.decks) { delete d.unlinkedRecords; delete d.autoPlay; }
+  const v = Backup.validate(old);
+  assert.ok(v.ok, v.error);
+  assert.equal(v.backup.schemaVersion, Backup.SCHEMA_VERSION);
+  const local = [localDeck({ cards: [{ key: "gA", cid: 11 }, { key: "gB", cid: 13 }] })];
+  const p = Backup.plan(v.backup, local);
+  assert.deepEqual(p.writes.records.map((r) => r.cardId).sort(), ["gA", "gB"]);
+  assert.deepEqual(p.writes.logs.map((l) => l.cardId), ["gA"]);
+  // 端末の記録がもうカードキーなら、同じ記録は重複として扱う
+  const p2 = Backup.plan(v.backup, apply(local, p));
+  assert.equal(p2.hasChanges, false);
+});
+
+test("カードキー(文字列)の記録と、結び付かない記録・自動再生の設定は、往復で保たれる", () => {
+  const b = makeBackup([{ id: "D1", name: "デッキ1", autoPlay: true, records: [rec("gA", 100)], unlinked: [{ ...rec(777, 50), uid: 3, deckId: "D1" }], logs: [log("gA", 100)] }]);
+  assert.equal(b.decks[0].unlinkedRecords[0].uid, undefined);
+  const v = roundTrip(b);
+  assert.ok(v.ok, v.error);
+  assert.deepEqual(v.backup, b);
+  // 空の端末に読み込むと、記録は学習記録へ、結び付かない記録は置き場へ。自動再生は端末に設定が無いときだけ反映
+  const local = [localDeck({ cards: [{ key: "gA", cid: 5 }] })];
+  const p = Backup.plan(v.backup, local);
+  assert.deepEqual(p.writes.records.map((r) => r.cardId), ["gA"]);
+  assert.deepEqual(p.writes.unlinked.map((r) => r.cardId), [777]);
+  assert.deepEqual(p.writes.autoPlay, [{ deckId: "D1", value: true }]);
+  assert.equal(Backup.plan(v.backup, [localDeck({ cards: [{ key: "gA", cid: 5 }], autoPlay: false })]).writes.autoPlay.length, 0);
+  assert.match(Backup.describe(p, { done: false }), /音声の自動再生: する を反映します/);
+});
+
+test("autoPlay の検査: 真偽値以外は拒否する", () => {
+  const j = JSON.parse(JSON.stringify(makeBackup([{ id: "D1", name: "デッキ1", records: [], logs: [] }])));
+  j.decks[0].autoPlay = "yes";
+  const v = Backup.validate(j);
+  assert.equal(v.ok, false);
+  assert.match(v.error, /自動再生/);
 });
 
 test("端末にデッキが無い: スキップして表示する(何も書かない)", () => {
@@ -247,16 +292,16 @@ test("複数デッキ: 反映できるデッキとスキップされるデッキ
     { id: "D2", name: "デッキ2", records: [rec(7, 100)], logs: [] },
     { id: "D3", name: "デッキ3", records: [rec(1, 100)], logs: [] },
   ])).backup;
-  const local = [localDeck(), localDeck({ id: "D2", name: "デッキ2", cardIds: ids(50) })];
+  const local = [localDeck(), localDeck({ id: "D2", name: "デッキ2", cards: ids(50) })];
   const p = Backup.plan(b, local);
   assert.deepEqual(p.writes.records.map((r) => `${r.deckId}:${r.cardId}`), ["D1:1"]);
   assert.equal(p.totals.orphanCards, 1);
   assert.equal(p.totals.missingDecks, 1);
 });
 
-test("cardIds が渡されていないデッキは、黙って進まずエラーにする", () => {
+test("カード一覧が渡されていないデッキは、黙って進まずエラーにする", () => {
   const b = roundTrip(makeBackup([{ id: "D1", name: "デッキ1", records: [rec(1, 100)], logs: [] }])).backup;
-  assert.throws(() => Backup.plan(b, [localDeck({ cardIds: null })]), /カード一覧/);
+  assert.throws(() => Backup.plan(b, [localDeck({ cards: null })]), /カード一覧/);
 });
 
 // ---- 検査(壊れたファイル・知らないファイルを拒否する) ----
@@ -275,7 +320,7 @@ test("検査: JSON でない・別アプリのファイルを拒否する", () =
 });
 
 test("検査: 新しすぎる/不正な schemaVersion を拒否する", () => {
-  const a = goodJson(); a.schemaVersion = 2; mustFail(a, /新しいバージョン/);
+  const a = goodJson(); a.schemaVersion = Backup.SCHEMA_VERSION + 1; mustFail(a, /新しいバージョン/);
   const b = goodJson(); b.schemaVersion = "1"; mustFail(b, /バージョン/);
   const c = goodJson(); c.schemaVersion = 0; mustFail(c, /バージョン/);
   const d = goodJson(); delete d.schemaVersion; mustFail(d, /バージョン/);
@@ -294,7 +339,9 @@ test("検査: 壊れた記録・履歴(位置つきで)を拒否する", () => {
   const a = goodJson(); a.decks[0].cardRecords[0].due = NaN; // JSON.stringify 後は null になるが、直接渡しても拒否
   mustFail(a, /cardRecords\[0\]/);
   const b = goodJson(); b.decks[0].cardRecords[0].state = 9; mustFail(b, /cardRecords\[0\]/);
-  const c = goodJson(); c.decks[0].cardRecords[0].cardId = "1"; mustFail(c, /cardRecords\[0\]/);
+  const c = goodJson(); c.decks[0].cardRecords[0].cardId = ""; mustFail(c, /cardRecords\[0\]/);
+  const c2 = goodJson(); c2.decks[0].cardRecords[0].cardId = 1.5; mustFail(c2, /cardRecords\[0\]/);
+  const c3 = goodJson(); c3.decks[0].unlinkedRecords = [{ cardId: 1 }]; mustFail(c3, /unlinkedRecords\[0\]/);
   const d = goodJson(); d.decks[0].reviewLogs[0].rating = 5; mustFail(d, /reviewLogs\[0\]/);
   const e = goodJson(); delete e.decks[0].reviewLogs[0].review; mustFail(e, /reviewLogs\[0\]/);
   const f = goodJson(); f.decks[0].cardRecords[0] = null; mustFail(f, /cardRecords\[0\]/);

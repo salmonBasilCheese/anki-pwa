@@ -5,12 +5,16 @@
 // IndexedDB や画面には触れない。ブラウザではグローバル `Backup`、Node では
 // require("./backup.js") で使える(tools/check_backup.mjs がテストする)。
 //
-// バックアップファイル(JSON) schemaVersion 1
-//   { app: "anki-pwa-backup", schemaVersion: 1, exportedAt: ms,
+// バックアップファイル(JSON) schemaVersion 2
+//   { app: "anki-pwa-backup", schemaVersion: 2, exportedAt: ms,
 //     decks: [ { id, name, newPerDay: 整数|null, showIpa: true|false|null, fontScale: FONT_SCALES のどれか|null(古い版の 1.4 は 1.2 に丸める),
 //                layout: { front: [フィールド名], back: [フィールド名] }|null(showIpa・fontScale・layout は省略可。古いファイルには無い),
+//                autoPlay: true|false|null(省略可),
 //                cardRecords: [ srs.js の record(形は srs.js の先頭コメント。deckId は持たない) ],
+//                unlinkedRecords: [ どのカードにも結び付かない記録(形は cardRecords と同じ。省略可) ],
 //                reviewLogs:  [ 回答履歴(deckId・自動採番の id は持たない) ] } ] }
+// cardId は、カードキー(note の guid。relink.js)の文字列か、古い版の数値のカード ID。
+// version 1 → 2: cardId が数値だけだった。読み込むときに .apkg を見てカードキーに直す(plan)。
 // 含めないもの: .apkg 本体・教材の中身(カードの内容)。
 //
 // バックアップの形を変えるときは SCHEMA_VERSION を上げ、MIGRATIONS に
@@ -18,9 +22,12 @@
 // ---------------------------------------------------------------
 const Backup = (() => {
   const APP = "anki-pwa-backup";
-  const SCHEMA_VERSION = 1;
+  const SCHEMA_VERSION = 2;
   // MIGRATIONS[n] は、schemaVersion n のデータを n+1 の形に変換して返す
-  const MIGRATIONS = {};
+  const MIGRATIONS = {
+    // 1 → 2: 形は同じ(数値の cardId は読み込むときに plan が直す)。新しい項目は省略扱い
+    1: (d) => ({ ...d, schemaVersion: 2 }),
+  };
   // カードの文字の倍率の選択肢(app.js の設定画面と同じ。標準は 1)
   const FONT_SCALES = [0.85, 1, 1.2];
   // 選択肢に無い数(古い版にあった 1.4 など)は、いちばん近い選択肢に丸める。数でない・範囲外は null
@@ -49,11 +56,13 @@ const Backup = (() => {
   const isNum = (x) => typeof x === "number" && Number.isFinite(x);
   const isInt = (x) => Number.isSafeInteger(x);
   const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+  // カードの識別: カードキー(文字列)か、古い版の数値のカード ID
+  const isCardId = (x) => isInt(x) || (typeof x === "string" && x.length >= 1 && x.length <= 200);
 
   // ---- 1件ずつの検査。決まった項目だけを取り出して返す(余計な項目は捨てる)。不正なら null ----
   function cleanRecord(r) {
     if (!isObj(r)) return null;
-    if (!isInt(r.cardId)) return null;
+    if (!isCardId(r.cardId)) return null;
     if (!isInt(r.state) || r.state < 0 || r.state > 3) return null;
     if (!isNum(r.due) || !isNum(r.stability) || !isNum(r.difficulty) || !isNum(r.scheduled_days)) return null;
     if (!isInt(r.learning_steps) || r.learning_steps < 0) return null;
@@ -69,7 +78,7 @@ const Backup = (() => {
 
   function cleanLog(l) {
     if (!isObj(l)) return null;
-    if (!isInt(l.cardId)) return null;
+    if (!isCardId(l.cardId)) return null;
     if (!isInt(l.rating) || l.rating < 1 || l.rating > 4) return null;
     if (!isInt(l.state) || l.state < 0 || l.state > 3) return null;
     if (!isNum(l.due) || !isNum(l.stability) || !isNum(l.difficulty) || !isNum(l.scheduled_days)) return null;
@@ -83,7 +92,7 @@ const Backup = (() => {
   }
 
   // ---- 書き出し用: 端末のデータからバックアップの形を作る ----
-  // decks: [{ id, name, newPerDay, showIpa, records, logs }]
+  // decks: [{ id, name, newPerDay, showIpa, fontScale, layout, autoPlay, records, unlinked, logs }]
   function build({ decks, now }) {
     const pickRecord = (r) => ({
       cardId: r.cardId, state: r.state, due: r.due,
@@ -107,7 +116,9 @@ const Backup = (() => {
         showIpa: typeof d.showIpa === "boolean" ? d.showIpa : null,
         fontScale: normalizeFontScale(d.fontScale),
         layout: cleanLayout(d.layout) ?? null,
+        autoPlay: typeof d.autoPlay === "boolean" ? d.autoPlay : null,
         cardRecords: d.records.map(pickRecord),
+        unlinkedRecords: (d.unlinked ?? []).map(pickRecord),
         reviewLogs: d.logs.map(pickLog),
       })),
     };
@@ -162,6 +173,12 @@ const Backup = (() => {
       if (cleanLayout(d.layout) === undefined) {
         return { ok: false, error: `${at} の表示項目の設定が正しくありません` };
       }
+      if (d.autoPlay != null && typeof d.autoPlay !== "boolean") {
+        return { ok: false, error: `${at} の音声の自動再生の設定が正しくありません` };
+      }
+      if (d.unlinkedRecords != null && !Array.isArray(d.unlinkedRecords)) {
+        return { ok: false, error: `${at} の結び付かない記録が読み取れません` };
+      }
       if (!Array.isArray(d.cardRecords) || !Array.isArray(d.reviewLogs)) {
         return { ok: false, error: `${at} の学習記録が読み取れません` };
       }
@@ -171,13 +188,19 @@ const Backup = (() => {
         if (!c) return { ok: false, error: `${at}.cardRecords[${j}] の形式が正しくありません` };
         cardRecords.push(c);
       }
+      const unlinkedRecords = [];
+      for (const [j, r] of (d.unlinkedRecords ?? []).entries()) {
+        const c = cleanRecord(r);
+        if (!c) return { ok: false, error: `${at}.unlinkedRecords[${j}] の形式が正しくありません` };
+        unlinkedRecords.push(c);
+      }
       const reviewLogs = [];
       for (const [j, l] of d.reviewLogs.entries()) {
         const c = cleanLog(l);
         if (!c) return { ok: false, error: `${at}.reviewLogs[${j}] の形式が正しくありません` };
         reviewLogs.push(c);
       }
-      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: normalizeFontScale(d.fontScale), layout: cleanLayout(d.layout), cardRecords, reviewLogs });
+      decks.push({ id: d.id, name: d.name, newPerDay: d.newPerDay ?? null, showIpa: d.showIpa ?? null, fontScale: normalizeFontScale(d.fontScale), layout: cleanLayout(d.layout), autoPlay: d.autoPlay ?? null, cardRecords, unlinkedRecords, reviewLogs });
     }
 
     return {
@@ -193,17 +216,19 @@ const Backup = (() => {
   const isNewer = (incoming, existing) => !existing || lastReviewOf(incoming) > lastReviewOf(existing);
 
   // backup: validate 済み。
-  // local: 端末の全デッキ [{ id, name, newPerDay, showIpa, fontScale, layout, records, logs, cardIds }]
-  //   records/logs/cardIds が要るのは、バックアップにも含まれるデッキだけ。
-  //   cardIds = そのデッキ(.apkg)に実在するカード ID の Set。
-  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, logs, newPerDay, showIpa, fontScale, layout }, hasChanges }
+  // local: 端末の全デッキ [{ id, name, newPerDay, showIpa, fontScale, layout, autoPlay, records, logs, unlinked, cards }]
+  //   records/logs/unlinked/cards が要るのは、バックアップにも含まれるデッキだけ。
+  //   cards = そのデッキ(.apkg)のカード [{ key: カードキー, cid: 数値のカード ID }]。
+  // バックアップの cardId(カードキーか数値の ID)は cards で今のカードキーに直す。
+  // どのカードにも結び付かない記録は捨てずに writes.unlinked(結び付かない記録の置き場)に入れる。
+  // 戻り値: { decks: デッキごとの結果, totals, writes: { records, unlinked, logs, newPerDay, showIpa, fontScale, layout, autoPlay }, hasChanges }
   function plan(backup, local) {
     const localById = new Map(local.map((d) => [d.id, d]));
-    const writes = { records: [], logs: [], newPerDay: [], showIpa: [], fontScale: [], layout: [] };
+    const writes = { records: [], unlinked: [], logs: [], newPerDay: [], showIpa: [], fontScale: [], layout: [], autoPlay: [] };
     const decks = [];
     const totals = {
       recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
-      orphanCards: 0, orphanLogs: 0, missingDecks: 0, missingRecords: 0,
+      orphanCards: 0, orphanLogs: 0, unlinkedAdd: 0, missingDecks: 0, missingRecords: 0,
     };
 
     for (const bd of backup.decks) {
@@ -221,41 +246,62 @@ const Backup = (() => {
         totals.missingRecords += bd.cardRecords.length;
         continue;
       }
-      if (!(ld.cardIds instanceof Set)) {
+      if (!Array.isArray(ld.cards)) {
         throw new Error(`デッキ「${ld.name}」のカード一覧が渡されていません`);
       }
+      const keys = new Set(ld.cards.map((c) => c.key));
+      const byCid = new Map(ld.cards.map((c) => [c.cid, c.key]));
+      // 今のカードキーに直す。結び付かなければ null
+      const resolve = (id) => (typeof id === "string" ? (keys.has(id) ? id : null) : byCid.get(id) ?? null);
 
       const orphan = new Set(); // 端末のデッキに無いカードの ID(記録・履歴の両方)
       const d = {
         id: bd.id, name: ld.name, status: "ok",
         recordsApply: 0, recordsKeep: 0, logsAdd: 0, logsDup: 0,
-        orphanCards: 0, orphanLogs: 0, newPerDayApplied: null, showIpaApplied: null, fontScaleApplied: null, layoutApplied: false,
+        orphanCards: 0, orphanLogs: 0, unlinkedAdd: 0,
+        newPerDayApplied: null, showIpaApplied: null, fontScaleApplied: null, layoutApplied: false, autoPlayApplied: null,
       };
 
-      // バックアップ内に同じカードが複数あれば、新しいほうだけを使う
+      // 結び付かない記録は、端末の置き場に同じもの(カード ID と最後に答えた日が同じ)が無ければ足す
+      const unlinkedSeen = new Set(ld.unlinked.map((r) => `${r.cardId}|${r.last_review}`));
+      const keepUnlinked = (r) => {
+        const k = `${r.cardId}|${r.last_review}`;
+        if (unlinkedSeen.has(k)) return;
+        unlinkedSeen.add(k);
+        writes.unlinked.push({ ...r, deckId: bd.id });
+        d.unlinkedAdd++;
+      };
+
+      // バックアップ内に同じカードが複数あれば、新しいほうだけを使う。負けた記録も置き場に残す
       const best = new Map();
-      for (const r of bd.cardRecords) {
-        if (!ld.cardIds.has(r.cardId)) { orphan.add(r.cardId); continue; }
-        if (isNewer(r, best.get(r.cardId))) best.set(r.cardId, r);
+      for (const r of [...bd.cardRecords, ...bd.unlinkedRecords]) {
+        const key = resolve(r.cardId);
+        if (key === null) { orphan.add(r.cardId); keepUnlinked(r); continue; }
+        const prev = best.get(key);
+        if (isNewer(r, prev)) { if (prev) keepUnlinked(prev); best.set(key, r); } else keepUnlinked(r);
       }
-      const localRecs = new Map(ld.records.map((r) => [r.cardId, r]));
-      for (const r of best.values()) {
-        if (isNewer(r, localRecs.get(r.cardId))) {
-          writes.records.push({ ...r, deckId: bd.id });
+      const localRecs = new Map(ld.records.map((r) => [resolve(r.cardId) ?? r.cardId, r]));
+      for (const [key, r] of best) {
+        if (isNewer(r, localRecs.get(key))) {
+          writes.records.push({ ...r, cardId: key, deckId: bd.id });
           d.recordsApply++;
         } else {
           d.recordsKeep++;
         }
       }
+      // 置き換えられる端末の記録は、付け替え(relink)のときに使われなくなるだけで、ここでは消さない
+      // (cardRecords の同じキーに上書きされる。上書きされる側は回答履歴に残っている)
 
-      // 回答履歴: (カード, 回答時刻)が同じものは重複として追加しない
-      const logKeys = new Set(ld.logs.map((l) => `${l.cardId}|${l.review}`));
+      // 回答履歴: (カード, 回答時刻)が同じものは重複として追加しない。結び付かない履歴も元の ID のまま残す
+      const logKeys = new Set(ld.logs.map((l) => `${resolve(l.cardId) ?? l.cardId}|${l.review}`));
       for (const l of bd.reviewLogs) {
-        if (!ld.cardIds.has(l.cardId)) { orphan.add(l.cardId); d.orphanLogs++; continue; }
-        const key = `${l.cardId}|${l.review}`;
-        if (logKeys.has(key)) { d.logsDup++; continue; }
-        logKeys.add(key);
-        writes.logs.push({ ...l, deckId: bd.id });
+        const key = resolve(l.cardId);
+        if (key === null) { orphan.add(l.cardId); d.orphanLogs++; }
+        const id = key ?? l.cardId;
+        const k = `${id}|${l.review}`;
+        if (logKeys.has(k)) { d.logsDup++; continue; }
+        logKeys.add(k);
+        writes.logs.push({ ...l, cardId: id, deckId: bd.id });
         d.logsAdd++;
       }
 
@@ -283,6 +329,12 @@ const Backup = (() => {
         d.layoutApplied = true;
       }
 
+      // 音声の自動再生: 同じく、端末に設定が無いときだけ反映する
+      if (typeof bd.autoPlay === "boolean" && ld.autoPlay == null) {
+        writes.autoPlay.push({ deckId: bd.id, value: bd.autoPlay });
+        d.autoPlayApplied = bd.autoPlay;
+      }
+
       d.orphanCards = orphan.size;
       decks.push(d);
       totals.recordsApply += d.recordsApply;
@@ -291,10 +343,10 @@ const Backup = (() => {
       totals.logsDup += d.logsDup;
       totals.orphanCards += d.orphanCards;
       totals.orphanLogs += d.orphanLogs;
+      totals.unlinkedAdd += d.unlinkedAdd;
     }
 
-    const hasChanges =
-      writes.records.length > 0 || writes.logs.length > 0 || writes.newPerDay.length > 0 || writes.showIpa.length > 0 || writes.fontScale.length > 0 || writes.layout.length > 0;
+    const hasChanges = Object.values(writes).some((list) => list.length > 0);
     return { decks, totals, writes, hasChanges };
   }
 
@@ -319,10 +371,11 @@ const Backup = (() => {
       if (d.showIpaApplied != null) lines.push(`  IPA の表示: ${d.showIpaApplied ? "表示する" : "表示しない"} を反映${done ? "しました" : "します"}`);
       if (d.fontScaleApplied != null) lines.push(`  文字サイズ: ${FONT_SCALE_LABELS[d.fontScaleApplied]} を反映${done ? "しました" : "します"}`);
       if (d.layoutApplied) lines.push(`  表示する項目の設定を反映${done ? "しました" : "します"}`);
+      if (d.autoPlayApplied != null) lines.push(`  音声の自動再生: ${d.autoPlayApplied ? "する" : "しない"} を反映${done ? "しました" : "します"}`);
       if (d.orphanCards > 0) {
-        lines.push(`  ⚠ ${n(d.orphanCards)} 枚は該当カードなしでスキップ` +
-          (d.orphanLogs ? `(履歴 ${n(d.orphanLogs)} 件を含む)` : "") +
-          "。デッキを作り直すとカード ID が変わることがあります。");
+        lines.push(`  ⚠ ${n(d.orphanCards)} 枚はデッキに該当するカードがありません。` +
+          `消さずに「結び付かない記録」として保存${done ? "しました" : "します"}` +
+          (d.unlinkedAdd ? `(新しく ${n(d.unlinkedAdd)} 件)` : "(保存済み)") + "。");
       }
     }
     return lines.join("\n");

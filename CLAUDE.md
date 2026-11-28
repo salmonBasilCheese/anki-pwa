@@ -10,12 +10,14 @@ Anki 互換の単語学習 PWA。iPhone のホーム画面から使う。
 - デッキ（.apkg）は別プロジェクト vocabulary-builder で作り、AirDrop で渡す。このリポジトリでは扱わない
 
 ## 構成
-- 静的ファイルのみ（index.html / app.js / srs.js / storage.js / backup.js / sw.js / manifest.webmanifest）
+- 静的ファイルのみ（index.html / app.js / srs.js / storage.js / backup.js / relink.js / sw.js / manifest.webmanifest）
 - 外部ライブラリは CDN から読まず lib/ に置く
 - 保存は storage.js（IndexedDB。バージョンは storage.js の DB_VERSION）
+- 学習記録はカードを note の guid（デッキを作り直しても変わらない）で識別する。数値のカード ID は作り直すと変わるので、記録の識別に使わない。付け替えの計算は relink.js。どのカードにも結び付かない記録は消さずに unlinkedRecords に残す
 - キャッシュは sw.js（バージョンは sw.js の CACHE_VERSION）
 - docs/ は運用の手順書（導入手順 setup-guide.md）。公開サイトには入れない
-- tools/ は開発補助（check_*.mjs はテスト、build_site.mjs は公開サイトの組み立て、make_icons.py はアイコン生成）
+- tools/ は開発補助（check_*.mjs はテスト、build_site.mjs は公開サイトの組み立て、make_icons.py はアイコン生成、try_relink.mjs はバックアップで記録の付け替えを試すだけの道具）
+  - check_storage.mjs は fake-indexeddb を使う（tools/package.json。先に `npm ci --prefix tools`）。tools/fixtures/storage_v2.js は「更新前の安定版」の storage.js を固定したもので、移行のテストに使う
 - icons-dev/ は開発版用の紫のアイコン（公開サイトには入れない）
 - .github/workflows/pages.yml が公開サイトを組み立てて GitHub Pages に公開する
 

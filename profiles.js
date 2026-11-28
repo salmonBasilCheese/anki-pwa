@@ -7,6 +7,7 @@
 //  audioButtons : 「その役割の横に置く音声ボタン -> 鳴らす音声の役割」
 //  audioRows    : 「音声だけの行(ボタンだけ出す)になる役割」
 //  ipa : IPA の役割(無い種類は null)
+//  autoPlay : 表を出したときに自動で鳴らせる音声の役割(設定でオンのときだけ鳴らす。無い種類は null)
 // ---------------------------------------------------------------
 const DECK_PROFILES = [
   {
@@ -20,6 +21,7 @@ const DECK_PROFILES = [
     audioButtons: { headword: "audioWord", exampleEN: "audioExample" },
     audioRows: [],
     ipa: "ipa",
+    autoPlay: "audioWord", // 単語の音声だけ。例文は鳴らさない
     longFront: false,
   },
   {
@@ -31,6 +33,7 @@ const DECK_PROFILES = [
     audioButtons: {},
     audioRows: ["audio"],
     ipa: null,
+    autoPlay: null, // 音声は裏面用(表で鳴ると答えが分かる)
     longFront: true, // 表面が文章。見出し語用の大きな中央寄せにしない
   },
 ];

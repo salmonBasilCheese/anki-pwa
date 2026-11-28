@@ -5,3 +5,4 @@ data/
 *.mp3
 *.pdf
 *.epub
+node_modules/

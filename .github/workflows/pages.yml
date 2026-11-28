@@ -37,7 +37,11 @@ jobs:
           path: dev
       - name: Run checks (dev)
         run: |
+          npm ci --prefix dev/tools
           node dev/tools/check_backup.mjs
+          node dev/tools/check_relink.mjs
+          node dev/tools/check_storage.mjs
+          node dev/tools/check_profiles.mjs
           node dev/tools/check_srs.mjs
           node dev/tools/check_pwa.mjs
           node dev/tools/check_site.mjs

@@ -35,7 +35,7 @@ for (const f of precache) {
 for (const f of [...files("lib"), ...files("icons")]) {
   check(precache.includes(f), `on disk and precached: ${f}`);
 }
-for (const f of ["index.html", "app.js", "storage.js", "backup.js", "srs.js", "profiles.js", "manifest.webmanifest"]) {
+for (const f of ["index.html", "app.js", "storage.js", "backup.js", "relink.js", "srs.js", "profiles.js", "manifest.webmanifest"]) {
   check(precache.includes(f), `core file precached: ${f}`);
 }
 check(precache.includes("./"), "start URL './' precached");

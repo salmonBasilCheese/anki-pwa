@@ -1,0 +1,8 @@
+{
+  "name": "anki-pwa-tools",
+  "private": true,
+  "description": "開発補助(テスト)だけで使う。公開サイトには入らない",
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.8"
+  }
+}
