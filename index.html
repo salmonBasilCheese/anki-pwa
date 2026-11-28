@@ -211,7 +211,11 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 10px 16px; min-height: 44px;
       cursor: pointer;
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
     }
+    button * { -webkit-user-select: none; user-select: none; }
     button:hover, input[type="file"]::file-selector-button:hover { background: var(--surface-hover); }
     button:active, input[type="file"]::file-selector-button:active { background: var(--surface-active); }
     button:focus-visible, input[type="file"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
