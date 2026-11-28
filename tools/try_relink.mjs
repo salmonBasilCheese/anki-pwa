@@ -54,6 +54,7 @@ for (const [i, bd] of v.backup.decks.entries()) {
     cards: d.cards,
     records: bd.cardRecords,
     unlinked: bd.unlinkedRecords.map((r, uid) => ({ ...r, uid })),
+    recover: true, // アプリでは使っていない「古い ID から戻す」処理を、ここでは試す
   });
   const logs = bd.reviewLogs.filter((l) => typeof l.cardId === "string" || p.logKey.has(l.cardId)).length;
   console.log(`${label}`);

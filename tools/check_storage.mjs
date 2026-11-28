@@ -206,26 +206,40 @@ await test("安定版の名前は変わらない: 安定版は DB 'anki-pwa'、�
   assert.equal((await stable.listDecks())[0].learnedCount, 12);
 });
 
-await test("作り直したデッキを取り込む: ID が全部変わっても、記録と履歴が元のカードに戻る", async () => {
+await test("付け替えたあとは、作り直したデッキ(ID が全部変わった)を取り込んでも、記録は guid で結び付いたまま", async () => {
   const factory = new IDBFactory();
   const oldCards = cardsOf(BASE);
-  const Old = oldApp(factory);
-  await studyOnOldApp(Old, oldCards);
-  const before = (await Old.exportAll())[0];
+  await studyOnOldApp(oldApp(factory), oldCards);
   const { DeckStore } = newApp(factory);
+  await DeckStore.relinkDeck(DECK.id, oldCards); // 更新後の初回起動
+  const once = await dump(DeckStore);
   const rebuilt = cardsOf(REBUILT);
-  const r = await DeckStore.saveDeck(DECK, BLOB, { replaceIds: [DECK.id], cards: rebuilt });
-  assert.equal(r.stats.recovered, 12);
+  await DeckStore.saveDeck(DECK, BLOB, { replaceIds: [DECK.id], cards: rebuilt });
   const d = (await dump(DeckStore))[0];
-  const idx = (cid) => (cid - BASE - 1) / 2;
-  assert.equal(d.records.length, 12);
-  for (const old of before.records) {
-    const now1 = d.records.find((x) => x.cardId === `guid-${idx(old.cardId)}`);
-    assert.deepEqual({ ...now1, cardId: old.cardId }, old);
-  }
-  assert.ok(d.logs.every((l) => typeof l.cardId === "string"), "履歴も戻る");
+  assert.deepEqual(d.records, once[0].records, "記録は 1 件も変わらない");
+  assert.deepEqual(d.logs, once[0].logs);
   assert.equal(d.unlinked.length, 0);
   assert.equal((await DeckStore.listDecks())[0].learnedCount, 12);
+});
+
+await test("付け替える前に作り直したデッキを取り込んだ: 古い ID の記録は推定で戻さず、消さずに置き場に残す", async () => {
+  const factory = new IDBFactory();
+  const Old = oldApp(factory);
+  await studyOnOldApp(Old, cardsOf(BASE));
+  const before = (await Old.exportAll())[0];
+  const { DeckStore } = newApp(factory);
+  const r = await DeckStore.saveDeck(DECK, BLOB, { replaceIds: [DECK.id], cards: cardsOf(REBUILT) });
+  assert.equal(r.stats.recovered, 0);
+  const d = (await dump(DeckStore))[0];
+  assert.equal(d.records.length, 0);
+  assert.equal(d.unlinked.length, 12);
+  for (const old of before.records) {
+    const u = d.unlinked.find((x) => x.cardId === old.cardId);
+    const { uid, ...rest } = u;
+    assert.deepEqual(rest, old, "元の ID・中身のまま残る");
+  }
+  assert.equal(d.logs.length, before.logs.length, "履歴も消えない");
+  assert.equal((await DeckStore.listDecks())[0].learnedCount, 0, "一覧には数えない");
 });
 
 await test("戻せない記録は消さずに置き場に残し、一覧の「学習済み」には数えない。デッキを消すと一緒に消える", async () => {

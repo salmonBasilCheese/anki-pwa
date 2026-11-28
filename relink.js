@@ -75,6 +75,10 @@ const Relink = (() => {
 
   // 1 つのデッキの付け替え計画。
   //  cards: 今のデッキのカード [{ key, cid }](並び順は問わない)
+  //  recover: 結び付かない古い ID を、作った順番から推定して戻すか(recover())。初期設定は false。
+  //    作り直しの間に単語の追加・並べ替えがあると別の単語に記録が付くおそれがあり、利用者のバックアップで
+  //    試せていないため、アプリでは使っていない。使うときは、付け替え済みのデッキにもう一度
+  //    付け替えが走るように(keyType の目印を変えるなど)すること。tools/try_relink.mjs は true で試す。
   //  records: cardRecords にある、このデッキの記録(cardId は数値かカードキー)
   //  unlinked: unlinkedRecords にある、このデッキの記録({ uid, ... })
   // 戻り値:
@@ -83,7 +87,7 @@ const Relink = (() => {
   //  logKey: Map(数値のカード ID → カードキー)。回答履歴の書き換えに使う
   //  stats: { linked, converted, recovered, restored, unlinked, conflicts }, groups: recover の結果
   // 先に recordsDelete を、そのあと recordsPut を行うこと(同じキーを消して書き直すことがあるため)。
-  function plan({ cards, records, unlinked }) {
+  function plan({ cards, records, unlinked, recover: useRecover = false }) {
     const keys = new Set(cards.map((c) => c.key));
     const byCid = new Map(cards.map((c) => [c.cid, c.key]));
     const direct = (id) => (typeof id === "string" ? (keys.has(id) ? id : null) : byCid.get(id) ?? null);
@@ -93,7 +97,7 @@ const Relink = (() => {
       ...unlinked.map((row) => ({ row, from: "unl" })),
     ];
     const missing = cands.filter((c) => direct(c.row.cardId) === null && typeof c.row.cardId === "number");
-    const rec = recover(cards, missing.map((c) => c.row.cardId));
+    const rec = useRecover ? recover(cards, missing.map((c) => c.row.cardId)) : { map: new Map(), groups: [] };
     const resolve = (id) => direct(id) ?? (typeof id === "number" ? rec.map.get(id) ?? null : null);
 
     const out = {
