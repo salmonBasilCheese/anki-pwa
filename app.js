@@ -20,7 +20,8 @@ const els = {
   gradeButtons: [...document.querySelectorAll(".grade")],
   counts: { new: $("count-new"), learning: $("count-learning"), review: $("count-review") },
   countBoxes: [...document.querySelectorAll(".count")],
-  done: $("done"), doneNote: $("done-note"),
+  done: $("done"), doneTitle: $("done-title"), doneNote: $("done-note"),
+  doneLater: $("done-later"), doneLaterMain: $("done-later-main"),
   backupLast: $("backup-last"), backupExport: $("backup-export"), backupImport: $("backup-import"),
   backupFile: $("backup-file"), backupResult: $("backup-result"),
   debug: $("debug"), debugClock: $("debug-clock"), debugViewport: $("debug-viewport"),
@@ -153,7 +154,7 @@ function describeError(e) {
 async function renderLibrary() {
   const decks = await DeckStore.listDecks();
 
-  // デッキごとの今日の残り枚数(新規 + 学習中 + 復習)
+  // デッキごとの今日の枚数(今すぐできる枚数と、あとで出る学習中の枚数)
   const nowMs = Srs.now();
   const remainingById = new Map(await Promise.all(decks.map(async (d) => {
     const [records, newToday] = await Promise.all([
@@ -168,8 +169,12 @@ async function renderLibrary() {
     });
     return [d.id, left];
   })));
-  // 今日の残り枚数が多いデッキほど上に並べる(同じ枚数なら、listDecks の「最後に開いた順」のまま)
-  decks.sort((a, b) => remainingById.get(b.id) - remainingById.get(a.id));
+  // 今すぐできる枚数が多いデッキほど上に並べる。同じなら、あとで出る枚数が多い順
+  // (どちらも同じなら、listDecks の「最後に開いた順」のまま)
+  decks.sort((a, b) => {
+    const x = remainingById.get(a.id), y = remainingById.get(b.id);
+    return (y.now - x.now) || (y.later - x.later);
+  });
   els.deckList.replaceChildren();
 
   if (decks.length === 0) {
@@ -192,7 +197,10 @@ async function renderLibrary() {
     const meta = document.createElement("div");
     meta.className = "deck-meta";
     const left = remainingById.get(d.id);
-    meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚 ・ ` + (left > 0 ? `今日の残り ${left}枚` : "今日の分は完了");
+    const parts = [];
+    if (left.now > 0) parts.push(`今すぐ ${left.now}枚`);
+    if (left.later > 0) parts.push(`あとで ${left.later}枚(あと${Srs.formatInterval(left.nextDue - nowMs)})`);
+    meta.textContent = `学習済み ${d.learnedCount} / ${d.cardCount}枚 ・ ` + (parts.length ? parts.join(" ・ ") : "今日の分は完了");
 
     li.append(name, meta);
 
@@ -617,7 +625,7 @@ function advance() {
     state.current = null;
     els.study.hidden = true;
     els.done.hidden = false;
-    els.doneNote.textContent = doneNote(nowMs);
+    renderDone(nowMs);
     return;
   }
 
@@ -638,17 +646,17 @@ function advance() {
   els.card.scrollTop = 0; // 前のカードで下までスクロールしていても、先頭から見せる
 }
 
-function doneNote(nowMs) {
+// 出せるカードが無いときの画面。あとで出る学習中カードがあれば「今はここまで」として目立たせる
+function renderDone(nowMs) {
   const s = state.session;
-  const notes = [];
-  if (s.unseen.length > 0 && s.newToday >= s.newPerDay) {
-    notes.push(`新規カードは今日の上限(${s.newPerDay}枚)に達しました。`);
+  const l = Srs.later(s, nowMs);
+  els.doneTitle.textContent = l.count > 0 ? "今はここまで" : "今日の学習は終わりです";
+  els.doneLater.hidden = l.count === 0;
+  if (l.count > 0) {
+    els.doneLaterMain.textContent = `あと${Srs.formatInterval(l.nextDue - nowMs)}で ${l.count}枚 出ます`;
   }
-  const due = Srs.nextLearningDue(s, nowMs);
-  if (due !== null) {
-    notes.push(`あと${Srs.formatInterval(due - nowMs)}で次の学習中カードが出ます。`);
-  }
-  return notes.join(" ");
+  els.doneNote.textContent = s.unseen.length > 0 && s.newToday >= s.newPerDay
+    ? `新規カードは今日の上限(${s.newPerDay}枚)に達しました。` : "";
 }
 
 function revealAnswer() {

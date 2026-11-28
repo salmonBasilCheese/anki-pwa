@@ -191,12 +191,6 @@ const Srs = (() => {
     return null;
   }
 
-  // まだ先に期限が来る学習中カードの、いちばん近い期限(ms)。無ければ null
-  function nextLearningDue(session, nowMs) {
-    const r = earliest([...session.records.values()].filter((x) => isLearning(x) && x.due > nowMs));
-    return r ? r.due : null;
-  }
-
   // 画面上部の残り枚数
   function counts(session, nowMs) {
     rollDay(session, nowMs);
@@ -211,7 +205,23 @@ const Srs = (() => {
     return { new: newLeft, learning, review };
   }
 
-  // デッキ一覧に出す「今日の残り枚数」。セッションを作らずに、学習記録と未学習の枚数だけで数える。
+  // 今日中に期限が来るが、今はまだ出せない学習中カード(先読みの時間より後)。
+  // 戻り値: { count, nextDue }。nextDue はいちばん早い期限(ms)、無ければ null
+  function later(session, nowMs) {
+    const from = nowMs + SRS_CONFIG.learnAheadMinutes * MIN;
+    const end = nextDayStart(nowMs);
+    let count = 0, nextDue = null;
+    for (const r of session.records.values()) {
+      if (isLearning(r) && r.due > from && r.due < end) {
+        count++;
+        if (nextDue === null || r.due < nextDue) nextDue = r.due;
+      }
+    }
+    return { count, nextDue };
+  }
+
+  // デッキ一覧に出す今日の枚数。セッションを作らずに、学習記録と未学習の枚数だけで数える。
+  // 戻り値: { now: 今すぐできる枚数, later: あとで出る枚数, nextDue: あとで出るいちばん早い期限 }
   function remaining({ records, unseenCount, newPerDay, newToday, nowMs }) {
     const session = {
       records: new Map(records.map((r) => [r.cardId, r])),
@@ -219,7 +229,8 @@ const Srs = (() => {
       newPerDay, newToday, dayIdx: dayIndex(nowMs),
     };
     const c = counts(session, nowMs);
-    return c.new + c.learning + c.review;
+    const l = later(session, nowMs);
+    return { now: c.new + c.learning + c.review - l.count, later: l.count, nextDue: l.nextDue };
   }
 
   // 回答結果をセッションに反映する(DB への保存に成功したあとで呼ぶ)
@@ -237,6 +248,6 @@ const Srs = (() => {
     now, setOffset, getOffset,
     dayIndex, dayStart, nextDayStart,
     labels, answer, formatInterval,
-    createSession, pickNext, nextLearningDue, counts, remaining, applyAnswer,
+    createSession, pickNext, counts, later, remaining, applyAnswer,
   };
 })();

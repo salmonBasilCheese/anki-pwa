@@ -181,6 +181,13 @@
     }
     #done-title { font-size: 1.3rem; margin: 0 0 8px; }
     #done-note { color: var(--text-muted); margin: 0; }
+    /* あとで出る学習中カードのお知らせ(「終わり」と誤解しないよう目立たせる) */
+    #done-later {
+      margin: 8px auto 16px; padding: 16px; max-width: 420px;
+      border: 2px solid var(--accent); border-radius: var(--radius); background: var(--surface);
+    }
+    #done-later-main { font-size: 1.3rem; font-weight: bold; color: var(--accent); margin: 0 0 6px; }
+    #done-later-sub { color: var(--text-muted); margin: 0; }
 
     /* 新しいバージョンのお知らせ(Service Worker が更新を見つけたとき) */
     #update-banner {
@@ -270,6 +277,10 @@
 
     <div id="done" hidden>
       <p id="done-title">今日の学習は終わりです</p>
+      <div id="done-later" hidden>
+        <p id="done-later-main"></p>
+        <p id="done-later-sub">このまま開いておけば、自動で始まります</p>
+      </div>
       <p id="done-note"></p>
     </div>
   </div>
